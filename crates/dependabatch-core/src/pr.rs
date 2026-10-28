@@ -29,6 +29,9 @@ pub enum Update {
 pub struct PrFile {
     pub filename: String,
     pub hunks: Vec<Hunk>,
+    /// Raw unified diff of the file as returned by the API; `None` for
+    /// binary files, deletions and renames.
+    pub patch: Option<String>,
 }
 
 /// Location and length of one hunk on the base and head side.
@@ -48,6 +51,8 @@ pub struct PullRequest {
     pub author: String,
     pub update: Update,
     pub files: Vec<PrFile>,
+    /// Base commit the PR was created against, when the API provided it.
+    pub base_sha: Option<String>,
 }
 
 impl PullRequest {
@@ -58,6 +63,7 @@ impl PullRequest {
             author: author.to_string(),
             update: parse_update(title),
             files,
+            base_sha: None,
         }
     }
 

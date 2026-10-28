@@ -12,7 +12,10 @@ pub fn conflicts_within(prs: &[PullRequest]) -> Vec<(u64, u64)> {
     let mut out = Vec::new();
     for (i, a) in prs.iter().enumerate() {
         for b in prs.iter().skip(i + 1) {
-            if files_conflict(&a.files, &b.files) {
+            if files_conflict(
+                &a.files.iter().collect::<Vec<_>>(),
+                &b.files.iter().collect::<Vec<_>>(),
+            ) {
                 out.push((a.number, b.number));
             }
         }
@@ -20,18 +23,39 @@ pub fn conflicts_within(prs: &[PullRequest]) -> Vec<(u64, u64)> {
     out
 }
 
-/// Groups of PRs bumping the same dependency name; the newest one wins later.
+/// Same as [`conflicts_within`], but files rejected by `skip` do not
+/// participate. Used in batch planning to ignore overlap inside lockfiles that
+/// dependabatch regenerates from manifests anyway.
+pub fn conflicts_while_skipping(
+    prs: &[PullRequest],
+    skip: &dyn Fn(&PrFile) -> bool,
+) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for (i, a) in prs.iter().enumerate() {
+        for b in prs.iter().skip(i + 1) {
+            let fa: Vec<_> = a.files.iter().filter(|f| !skip(f)).collect();
+            let fb: Vec<_> = b.files.iter().filter(|f| !skip(f)).collect();
+            if files_conflict(&fa, &fb) {
+                out.push((a.number, b.number));
+            }
+        }
+    }
+    out
+}
+
+/// Groups of PRs bumping the same dependency in the same manifest; the
+/// survivor keeps the highest target version.
 pub fn duplicate_groups(prs: &[PullRequest]) -> Vec<Vec<u64>> {
-    let mut by_name: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
+    let mut by_key: BTreeMap<(&str, &Option<String>), BTreeSet<u64>> = BTreeMap::new();
     for pr in prs {
         if let crate::pr::Update::Bump(bump) = &pr.update {
-            by_name
-                .entry(bump.name.as_str())
+            by_key
+                .entry((bump.name.as_str(), &bump.path))
                 .or_default()
                 .insert(pr.number);
         }
     }
-    by_name
+    by_key
         .into_values()
         .filter(|g| g.len() > 1)
         .map(|g| g.into_iter().collect())
@@ -48,7 +72,7 @@ pub fn conflicted_numbers(conflicts: &[(u64, u64)]) -> BTreeSet<u64> {
     set
 }
 
-fn files_conflict(a: &[PrFile], b: &[PrFile]) -> bool {
+fn files_conflict(a: &[&PrFile], b: &[&PrFile]) -> bool {
     a.iter().any(|fa| {
         b.iter()
             .any(|fb| fa.filename == fb.filename && same_file_conflict(fa, fb))
@@ -88,6 +112,7 @@ mod tests {
                     new_len: l,
                 })
                 .collect(),
+            patch: None,
         }
     }
 
@@ -176,5 +201,23 @@ mod tests {
             pr(13, "Bump axios from 1.6.0 to 1.7.0", Vec::new()),
         ];
         assert_eq!(duplicate_groups(&prs), vec![vec![11, 12]]);
+    }
+
+    #[test]
+    fn lockfile_overlap_can_be_skipped() {
+        let prs = vec![
+            pr(
+                1,
+                "Bump vue from 3.4.0 to 3.5.0",
+                vec![file("package-lock.json", &[(10, 5)])],
+            ),
+            pr(
+                2,
+                "Bump axios from 1.6.0 to 1.7.0",
+                vec![file("package-lock.json", &[(10, 5)])],
+            ),
+        ];
+        assert_eq!(conflicts_within(&prs), vec![(1, 2)]);
+        assert!(conflicts_while_skipping(&prs, &|f| f.filename == "package-lock.json").is_empty());
     }
 }

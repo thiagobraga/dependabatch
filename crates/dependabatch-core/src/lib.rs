@@ -3,9 +3,12 @@
 //! The library is surface agnostic: the CLI, the GitHub Action, the web API and
 //! the Tauri desktop app all reuse these pieces.
 
+pub mod batch;
 pub mod client;
 pub mod conflict;
+pub mod plan;
 pub mod pr;
+pub mod regen;
 pub mod report;
 
 pub use pr::{DepBump, Hunk, PrFile, PullRequest, Update, parse_update};

@@ -17,9 +17,9 @@ closes the originals with a `Superseded by #N` comment.
 | Stage | Feature | State |
 | ----- | ------- | ----- |
 | 1 | `dependabatch scan owner/repo`: report open dependabot PRs and conflicts | shipping |
-| 2 | `dependabatch batch owner/repo`: open the batch PR | planned |
+| 2 | `dependabatch batch owner/repo`: open the batch PR | shipping |
 | 3 | `dependabatch merge` + supersede cleanup | planned |
-| 4 | Dockerized lockfile regeneration, `dependabatch.yml` config | planned |
+| 4 | `dependabatch.yml` per-repo config | planned |
 | 5 | GitHub Action wrapper | planned |
 | 6 | Web dashboard (axum + React) | planned |
 | 7 | Tauri desktop app | planned |
@@ -29,10 +29,46 @@ closes the originals with a `Superseded by #N` comment.
 ```sh
 cargo install --path crates/dependabatch-cli
 dependabatch scan thiagobraga/dependabatch
+# look at the plan without touching anything
+dependabatch batch owner/repo --dry-run
+# open the batch PR: manifests applied, lockfile rebuilt in docker
+dependabatch batch owner/repo
 ```
 
 Authentication resolution order: `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`.
 The token needs `repo` access (Contents: read/write for the batch stage).
+
+## Batch flags
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--dry-run` | print the plan (in/out per PR) and stop |
+| `--exclude zod` | keep a dependency out of the batch |
+| `--base main` | build from another base branch instead of the default |
+| `--regen-image node:24` | docker image used for lockfile regen |
+| `--no-regen` | skip lockfile regeneration (manifest edits only) |
+
+The batch PR body carries a table of every bump plus a `Supersedes: #12, #14`
+list, so GitHub cross-links the originals and reviewers see exactly what got
+absorbed.
+
+## Docker cleanup
+
+Lockfile regeneration runs in an ephemeral node container started with `--rm`,
+so containers disappear when a run ends, even on failure. Leftovers only appear
+if you kill the docker daemon mid-run. Audit and clean:
+
+```sh
+# audit
+docker ps -a --filter name=dependabatch-regen
+
+# remove stragglers
+docker rm -f $(docker ps -aq --filter name=dependabatch-regen)
+
+# free up the pulled image when you want the npm cache gone too
+docker image rm node:24
+docker image prune -f
+```
 
 ## Scan output
 
