@@ -215,11 +215,20 @@ fn applicable_non_manifest_files(pr: &PullRequest) -> Vec<&PrFile> {
 /// Patches carry their own file header via the wrap diff; positions come from
 /// the API patch body.
 fn file_diff(f: &PrFile) -> String {
-    format!(
-        "diff --git a/{name} a/{name}\n--- a/{name}\n+++ b/{name}\n{patch}",
-        name = f.filename,
-        patch = f.patch.as_deref().unwrap_or_default()
-    )
+    let mut patch = f.patch.as_deref().unwrap_or_default().to_string();
+    if !patch.is_empty() && !patch.ends_with('\n') {
+        patch.push('\n');
+    }
+    if patch.starts_with("diff --git") {
+        patch
+    } else if patch.starts_with("--- ") {
+        format!("diff --git a/{name} b/{name}\n{patch}", name = f.filename)
+    } else {
+        format!(
+            "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{patch}",
+            name = f.filename,
+        )
+    }
 }
 
 fn path_name(path: &Path) -> String {
@@ -426,8 +435,22 @@ mod tests {
     fn file_diff_has_headers() {
         let f = file("package.json");
         let diff = file_diff(&f);
-        assert!(diff.starts_with("diff --git a/package.json a/package.json"));
+        assert!(diff.starts_with("diff --git a/package.json b/package.json"));
+        assert!(diff.contains("--- a/package.json\n+++ b/package.json"));
         assert!(diff.contains("@@ -1,1 +1,2 @@"));
+        assert!(diff.ends_with('\n'));
+    }
+
+    #[test]
+    fn file_diff_ensures_trailing_newline() {
+        let f = PrFile {
+            filename: ".docker/Dockerfile".into(),
+            hunks: Vec::new(),
+            patch: Some("@@ -1,2 +1,2 @@\n-FROM node:20\n+FROM node:22".into()),
+        };
+        let diff = file_diff(&f);
+        assert!(diff.ends_with('\n'));
+        assert!(diff.contains("+FROM node:22\n"));
     }
 
     #[test]
