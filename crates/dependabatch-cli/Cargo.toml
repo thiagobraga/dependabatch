@@ -13,7 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 dependabatch-core = { path = "../dependabatch-core" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

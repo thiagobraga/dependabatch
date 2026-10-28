@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dependabatch</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0d1117; color: #d2a8ff; margin: 0; padding: 2rem; }
+  h1 { font-size: 1.2rem; color: #e6edf3; }
+  p.hint { color: #7d8590; font-size: .85rem; }
+  form { display: flex; gap: .5rem; margin: 1rem 0 1.5rem; }
+  input { flex: 1; max-width: 28rem; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: .5rem .75rem; }
+  button { background: #238636; color: #fff; border: none; border-radius: 6px; padding: .5rem 1rem; cursor: pointer; }
+  button:hover { background: #29903b; }
+  table { border-collapse: collapse; width: 100%; max-width: 60rem; font-size: .85rem; }
+  th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #21262d; }
+  th { color: #7d8590; font-weight: 400; text-transform: uppercase; font-size: .7rem; letter-spacing: .05em; }
+  td.num { color: #79c0ff; white-space: nowrap; }
+  .ready { color: #3fb950; }
+  .conflict { color: #f0883e; }
+  .duplicate { color: #d29922; }
+  .other { color: #7d8590; }
+  #notes { color: #8b949e; font-size: .8rem; margin-top: 1rem; white-space: pre-wrap; max-width: 60rem; }
+</style>
+</head>
+<body>
+<h1>dependabatch</h1>
+<p class="hint">local scan dashboard. batch runs still happen from the CLI.</p>
+<form onsubmit="runScan(event)">
+  <input id="repo" placeholder="owner/repo" autofocus>
+  <button type="submit">scan</button>
+</form>
+<div id="output"></div>
+<div id="notes"></div>
+<script>
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  async function runScan(e) {
+    e.preventDefault();
+    const repo = document.getElementById('repo').value.trim();
+    const output = document.getElementById('output');
+    const notes = document.getElementById('notes');
+    if (!repo) return;
+    output.textContent = 'scanning ' + repo + ' ...';
+    notes.textContent = '';
+    const res = await fetch('/api/scan?repo=' + encodeURIComponent(repo));
+    const data = await res.json();
+    if (!res.ok) {
+      output.textContent = 'error: ' + (data.error || res.status);
+      return;
+    }
+    if (!data.rows.length) {
+      output.textContent = 'no open dependabot PRs in ' + esc(data.repo);
+      return;
+    }
+    output.innerHTML =
+      '<table><thead><tr><th>PR</th><th>update</th><th>files</th><th>status</th></tr></thead><tbody>' +
+      data.rows.map(r =>
+        '<tr><td class="num">#' + r.number + '</td><td>' +
+        '<a style="color:inherit;text-decoration:none" href="https://github.com/' + esc(data.repo) + '/pull/' + r.number + '">' + esc(r.update) + '</a>' +
+        '</td><td>' + r.files + '</td><td class="' + r.status + '">' + r.status + '</td></tr>').join('') +
+      '</tbody></table>';
+    let n = '';
+    if (data.duplicates.length)
+      n += 'duplicate dep (newest wins): ' + data.duplicates.map(g => g.map(i => '#' + i).join(', ')).join(' / ') + '\n';
+    if (data.conflicts.length)
+      n += 'conflicting pairs (kept out of batch): ' + data.conflicts.map(p => p[0] + '<->' + p[1]).join(' ');
+    notes.innerHTML = n;
+  }
+</script>
+</body>
+</html>

@@ -47,6 +47,15 @@ enum Command {
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+    /// Run a tiny local dashboard: scan repos from the browser.
+    Serve {
+        /// Address to bind.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to bind.
+        #[arg(long, default_value_t = 8280)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -137,7 +146,56 @@ async fn run() -> Result<()> {
             println!("applied files : {}", result.applied_files);
             Ok(())
         }
+        Command::Serve { host, port } => serve(host, port).await,
     }
+}
+
+/// Tiny local dashboard: static page plus a scan API backed by the core lib.
+async fn serve(host: String, port: u16) -> Result<()> {
+    use axum::{Json, Router, extract::Query, http::StatusCode, response::Html, routing::get};
+
+    async fn index() -> Html<&'static str> {
+        Html(include_str!("web/index.html"))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ScanQuery {
+        repo: String,
+    }
+
+    async fn api_scan(
+        Query(q): Query<ScanQuery>,
+    ) -> Result<Json<ScanReport>, (StatusCode, String)> {
+        let slug = RepoSlug::parse(&q.repo).map_err(api_err(StatusCode::BAD_REQUEST))?;
+        let token = token().map_err(api_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let client =
+            GithubClient::new(&token).map_err(api_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let prs = client
+            .open_dependabot_prs(&slug)
+            .await
+            .map_err(api_err(StatusCode::BAD_GATEWAY))?;
+        Ok(Json(ScanReport::build(slug.as_str(), &prs)))
+    }
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/api/scan", get(api_scan));
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("binding {addr}"))?;
+    println!("dependabatch dashboard: http://{addr} (ctrl-c to stop)");
+    axum::serve(listener, app)
+        .await
+        .with_context(|| "serving")?;
+    Ok(())
+}
+
+/// Map an `anyhow` failure onto an HTTP status with the error chain as text.
+fn api_err(
+    status: axum::http::StatusCode,
+) -> impl Fn(anyhow::Error) -> (axum::http::StatusCode, String) {
+    move |e: anyhow::Error| (status, format!("{e:#}"))
 }
 
 fn dep_name(pr: &dependabatch_core::pr::PullRequest) -> Option<&str> {

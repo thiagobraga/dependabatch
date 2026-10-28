@@ -33,10 +33,28 @@ dependabatch scan thiagobraga/dependabatch
 dependabatch batch owner/repo --dry-run
 # open the batch PR: manifests applied, lockfile rebuilt in docker
 dependabatch batch owner/repo
+# local dashboard in your browser
+dependabatch serve --host 127.0.0.1 --port 8280
 ```
 
 Authentication resolution order: `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`.
 The token needs `repo` access (Contents: read/write for the batch stage).
+
+## Install
+
+One-liner (linux + macOS, installs to `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thiagobraga/dependabatch/main/install.sh | sh
+```
+
+Environment overrides: `DEPENDABATCH_VERSION=v0.1.0` pins a tag,
+`DEPENDABATCH_INSTALL=/usr/local/bin` changes the target dir. The script
+detects the platform, downloads the release asset, verifies its sha256 and
+prints the binary version at the end. The linux x86_64 build is static (musl),
+so it runs on any distro. Windows or other platforms: grab an asset from
+[releases](https://github.com/thiagobraga/dependabatch/releases) directly, or
+install from a checkout with `cargo install --path crates/dependabatch-cli`.
 
 ## Batch flags
 
