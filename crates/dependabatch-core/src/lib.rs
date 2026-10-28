@@ -6,6 +6,7 @@
 pub mod batch;
 pub mod client;
 pub mod conflict;
+pub mod manifest;
 pub mod plan;
 pub mod pr;
 pub mod regen;

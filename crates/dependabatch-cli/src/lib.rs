@@ -3,7 +3,6 @@ use clap::{Parser, Subcommand};
 use dependabatch_core::batch;
 use dependabatch_core::client::{GithubClient, RepoSlug};
 use dependabatch_core::plan::{RegenPlan, select};
-use dependabatch_core::pr::Update;
 use dependabatch_core::report::ScanReport;
 use std::path::Path;
 
@@ -11,11 +10,16 @@ use std::path::Path;
 #[command(
     name = "dependabatch",
     version,
+    disable_version_flag = true,
     about = "Collect open dependabot PRs into one superseding batch PR"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Print version.
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -30,7 +34,8 @@ enum Command {
         json: bool,
     },
     /// Apply clean dependabot PRs to a batch branch and open the superseding PR.
-    Batch {
+    #[command(name = "run", visible_aliases = ["batch", "pr", "fix"])]
+    Run {
         /// `owner/name`, a GitHub URL, or a local git checkout path
         /// (defaults to the current directory).
         repo: Option<String>,
@@ -84,7 +89,7 @@ async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Batch {
+        Command::Run {
             repo,
             base,
             exclude,
@@ -110,14 +115,13 @@ async fn run() -> Result<()> {
                 let removed: Vec<u64> = plan
                     .included
                     .iter()
-                    .filter(|pr| dep_name(pr).is_some_and(|n| n == name))
+                    .filter(|pr| pr_has_dep(pr, name))
                     .map(|pr| pr.number)
                     .collect();
                 if removed.is_empty() {
                     return Err(anyhow!("--exclude {name}: no such dependency in the batch"));
                 }
-                plan.included
-                    .retain(|pr| dep_name(pr).is_none_or(|n| n != name));
+                plan.included.retain(|pr| !pr_has_dep(pr, name));
                 plan.excluded.extend(removed.into_iter().map(|number| {
                     dependabatch_core::plan::Excluded {
                         number,
@@ -180,9 +184,82 @@ async fn serve(host: String, port: u16) -> Result<()> {
         Ok(Json(ScanReport::build(slug.as_str(), &prs)))
     }
 
+    #[derive(serde::Serialize)]
+    struct SimulateResponse {
+        repo: String,
+        summary: String,
+        preview: String,
+        included: Vec<PullPreview>,
+        excluded: Vec<ExcludedPreview>,
+        regen: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct PullPreview {
+        number: u64,
+        update: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct ExcludedPreview {
+        number: u64,
+        reason: String,
+    }
+
+    async fn api_simulate(
+        Query(q): Query<ScanQuery>,
+    ) -> Result<Json<SimulateResponse>, (StatusCode, String)> {
+        let slug = RepoSlug::parse(&q.repo).map_err(api_err(StatusCode::BAD_REQUEST))?;
+        let token = token().map_err(api_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let client =
+            GithubClient::new(&token).map_err(api_err(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let prs = client
+            .open_dependabot_prs(&slug)
+            .await
+            .map_err(api_err(StatusCode::BAD_GATEWAY))?;
+        let base = client
+            .default_branch(&slug)
+            .await
+            .map_err(api_err(StatusCode::BAD_GATEWAY))?;
+        let has_lock = client
+            .file_exists(&slug, "package-lock.json", &base)
+            .await
+            .unwrap_or(false);
+        let plan = select(&prs, has_lock);
+        let summary = plan.summary();
+        let preview = batch::preview(&plan);
+        let included = plan
+            .included
+            .iter()
+            .map(|pr| PullPreview {
+                number: pr.number,
+                update: pr.describe(),
+            })
+            .collect();
+        let excluded = plan
+            .excluded
+            .iter()
+            .map(|e| ExcludedPreview {
+                number: e.number,
+                reason: e.reason.clone(),
+            })
+            .collect();
+        let regen = format!("{:?}", plan.regen);
+
+        Ok(Json(SimulateResponse {
+            repo: slug.as_str().to_string(),
+            summary,
+            preview,
+            included,
+            excluded,
+            regen,
+        }))
+    }
+
     let app = Router::new()
         .route("/", get(index))
-        .route("/api/scan", get(api_scan));
+        .route("/api/scan", get(api_scan))
+        .route("/api/simulate", get(api_simulate));
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -201,11 +278,8 @@ fn api_err(
     move |e: anyhow::Error| (status, format!("{e:#}"))
 }
 
-fn dep_name(pr: &dependabatch_core::pr::PullRequest) -> Option<&str> {
-    match &pr.update {
-        Update::Bump(b) => Some(b.name.as_str()),
-        Update::Other { .. } => None,
-    }
+fn pr_has_dep(pr: &dependabatch_core::pr::PullRequest, name: &str) -> bool {
+    pr.bumps().iter().any(|b| b.name == name)
 }
 
 /// Resolve the target repository from the CLI argument:

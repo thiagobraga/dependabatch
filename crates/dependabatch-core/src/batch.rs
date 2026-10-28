@@ -107,8 +107,46 @@ pub async fn run(
     };
 
     let mut applied = 0usize;
+
+    // 1. Semantically apply package.json manifest changes at the JSON level
+    let mut manifest_bumps: std::collections::BTreeMap<String, Vec<&crate::pr::DepBump>> =
+        std::collections::BTreeMap::new();
+
     for pr in &plan.included {
-        for file in applicable_files(pr) {
+        for bump in pr.bumps() {
+            let manifest_filename = match &bump.path {
+                Some(p) => {
+                    let clean = p.trim_start_matches('/');
+                    format!("{clean}/package.json")
+                }
+                None => "package.json".to_string(),
+            };
+            manifest_bumps
+                .entry(manifest_filename)
+                .or_default()
+                .push(bump);
+        }
+    }
+
+    for (rel_path, bumps) in manifest_bumps {
+        let full_path = work.root.join(&rel_path);
+        if full_path.is_file() {
+            step(&format!(
+                "semantically updating {rel_path} ({} bumps)",
+                bumps.len()
+            ));
+            if let Err(err) = crate::manifest::apply_bumps_to_package_json(&full_path, &bumps) {
+                return Err(err
+                    .context(format!("applying semantic bumps to `{rel_path}`"))
+                    .context(scratch_note(&parent)));
+            }
+            applied += 1;
+        }
+    }
+
+    // 2. Apply non-manifest files (such as workflows) via git patch
+    for pr in &plan.included {
+        for file in applicable_non_manifest_files(pr) {
             let diff = file_diff(file);
             let piece = path_name(&parent.join("piece.diff"));
             fs::write(&piece, diff).context("writing diff piece")?;
@@ -126,8 +164,8 @@ pub async fn run(
     }
 
     if plan.regen == RegenPlan::Npm {
-        step("regenerating npm lockfile inside an ephemeral docker container");
-        if let Err(err) = crate::regen::regenerate_npm_lock(&work.root, regen_image) {
+        step("regenerating npm lockfile(s) inside an ephemeral docker container");
+        if let Err(err) = crate::regen::regenerate_all_npm_locks(&work.root, regen_image) {
             return Err(err.context(scratch_note(&parent)));
         }
     }
@@ -161,13 +199,13 @@ pub async fn run(
     })
 }
 
-fn applicable_files(pr: &PullRequest) -> Vec<&PrFile> {
+fn applicable_non_manifest_files(pr: &PullRequest) -> Vec<&PrFile> {
     pr.files
         .iter()
         .filter(|f| {
             matches!(
                 classify_file(&f.filename),
-                FileKind::NpmManifest | FileKind::Workflow
+                FileKind::Workflow | FileKind::Docker
             )
         })
         .filter(|f| f.patch.is_some())

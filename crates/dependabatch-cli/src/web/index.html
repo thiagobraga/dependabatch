@@ -7,66 +7,159 @@
 <style>
   :root { color-scheme: dark; }
   body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0d1117; color: #d2a8ff; margin: 0; padding: 2rem; }
-  h1 { font-size: 1.2rem; color: #e6edf3; }
-  p.hint { color: #7d8590; font-size: .85rem; }
-  form { display: flex; gap: .5rem; margin: 1rem 0 1.5rem; }
-  input { flex: 1; max-width: 28rem; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: .5rem .75rem; }
-  button { background: #238636; color: #fff; border: none; border-radius: 6px; padding: .5rem 1rem; cursor: pointer; }
-  button:hover { background: #29903b; }
-  table { border-collapse: collapse; width: 100%; max-width: 60rem; font-size: .85rem; }
-  th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #21262d; }
+  h1 { font-size: 1.25rem; color: #e6edf3; margin-bottom: .25rem; }
+  p.hint { color: #7d8590; font-size: .85rem; margin-top: 0; }
+  form { display: flex; gap: .5rem; margin: 1.25rem 0 1.5rem; flex-wrap: wrap; }
+  input { flex: 1; min-width: 16rem; max-width: 28rem; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: .55rem .75rem; font-size: .9rem; }
+  button { font-family: inherit; font-size: .85rem; font-weight: 500; border: none; border-radius: 6px; padding: .55rem 1.1rem; cursor: pointer; transition: background .15s ease; }
+  button.btn-scan { background: #238636; color: #fff; }
+  button.btn-scan:hover { background: #2ea043; }
+  button.btn-simulate { background: #1f6feb; color: #fff; }
+  button.btn-simulate:hover { background: #388bfd; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  table { border-collapse: collapse; width: 100%; max-width: 64rem; font-size: .85rem; margin-top: .75rem; }
+  th, td { text-align: left; padding: .45rem .65rem; border-bottom: 1px solid #21262d; }
   th { color: #7d8590; font-weight: 400; text-transform: uppercase; font-size: .7rem; letter-spacing: .05em; }
   td.num { color: #79c0ff; white-space: nowrap; }
+  .badge { display: inline-block; padding: .2rem .5rem; border-radius: 12px; font-size: .75rem; font-weight: 600; text-transform: uppercase; }
   .ready { color: #3fb950; }
   .conflict { color: #f0883e; }
   .duplicate { color: #d29922; }
   .other { color: #7d8590; }
-  #notes { color: #8b949e; font-size: .8rem; margin-top: 1rem; white-space: pre-wrap; max-width: 60rem; }
+  .section-title { font-size: 1rem; color: #e6edf3; margin-top: 1.5rem; margin-bottom: .5rem; display: flex; align-items: center; gap: .5rem; }
+  .preview-box { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; max-width: 64rem; margin-top: 1rem; color: #e6edf3; font-size: .85rem; white-space: pre-wrap; line-height: 1.45; }
+  #notes { color: #8b949e; font-size: .8rem; margin-top: 1rem; white-space: pre-wrap; max-width: 64rem; }
+  .banner { padding: .75rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: .85rem; max-width: 64rem; }
+  .banner-info { background: #1f2a37; border: 1px solid #374151; color: #93c5fd; }
+  .banner-err { background: #3b1d1d; border: 1px solid #5c2828; color: #fca5a5; }
 </style>
 </head>
 <body>
 <h1>dependabatch</h1>
-<p class="hint">local scan dashboard. batch runs still happen from the CLI.</p>
+<p class="hint">Local dashboard to scan dependabot PRs and simulate batch merges.</p>
+
 <form onsubmit="runScan(event)">
   <input id="repo" placeholder="owner/repo" autofocus>
-  <button type="submit">scan</button>
+  <button type="submit" class="btn-scan" id="btn-scan">Scan</button>
+  <button type="button" class="btn-simulate" id="btn-simulate" onclick="runSimulate()">Simulate batch</button>
 </form>
+
 <div id="output"></div>
 <div id="notes"></div>
+
 <script>
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+  function setBusy(busy) {
+    document.getElementById('btn-scan').disabled = busy;
+    document.getElementById('btn-simulate').disabled = busy;
+  }
+
   async function runScan(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     const repo = document.getElementById('repo').value.trim();
     const output = document.getElementById('output');
     const notes = document.getElementById('notes');
     if (!repo) return;
-    output.textContent = 'scanning ' + repo + ' ...';
+
+    setBusy(true);
+    output.innerHTML = '<div class="banner banner-info">Scanning ' + esc(repo) + '...</div>';
     notes.textContent = '';
-    const res = await fetch('/api/scan?repo=' + encodeURIComponent(repo));
-    const data = await res.json();
-    if (!res.ok) {
-      output.textContent = 'error: ' + (data.error || res.status);
+
+    try {
+      const res = await fetch('/api/scan?repo=' + encodeURIComponent(repo));
+      const data = await res.json();
+      if (!res.ok) {
+        output.innerHTML = '<div class="banner banner-err">Error: ' + esc(data.error || res.statusText || res.status) + '</div>';
+        return;
+      }
+      if (!data.rows.length) {
+        output.innerHTML = '<div class="banner banner-info">No open dependabot PRs in ' + esc(data.repo) + '</div>';
+        return;
+      }
+
+      let html = '<div style="display:flex; justify-content:space-between; align-items:center; max-width:64rem;">' +
+                 '<div class="section-title">Open Dependabot PRs (' + data.rows.length + ')</div>' +
+                 '<button type="button" class="btn-simulate" onclick="runSimulate()">Simulate batch</button>' +
+                 '</div>';
+
+      html += '<table><thead><tr><th>PR</th><th>Update</th><th>Files</th><th>Status</th></tr></thead><tbody>' +
+        data.rows.map(r =>
+          '<tr><td class="num">#' + r.number + '</td><td>' +
+          '<a style="color:inherit;text-decoration:none" href="https://github.com/' + esc(data.repo) + '/pull/' + r.number + '" target="_blank">' + esc(r.update) + '</a>' +
+          '</td><td>' + r.files + '</td><td class="' + r.status + '">' + r.status + '</td></tr>').join('') +
+        '</tbody></table>';
+
+      output.innerHTML = html;
+
+      let n = '';
+      if (data.duplicates.length)
+        n += 'duplicate dep (newest wins in batch): ' + data.duplicates.map(g => g.map(i => '#' + i).join(', ')).join(' / ') + '\n';
+      if (data.conflicts.length)
+        n += 'conflicting pairs (kept out of batch): ' + data.conflicts.map(p => p[0] + '<->' + p[1]).join(' ');
+      notes.innerHTML = n;
+    } catch (err) {
+      output.innerHTML = '<div class="banner banner-err">Failed to connect: ' + esc(err.message) + '</div>';
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runSimulate() {
+    const repo = document.getElementById('repo').value.trim();
+    const output = document.getElementById('output');
+    const notes = document.getElementById('notes');
+    if (!repo) {
+      alert('Please enter a repository in owner/repo format');
       return;
     }
-    if (!data.rows.length) {
-      output.textContent = 'no open dependabot PRs in ' + esc(data.repo);
-      return;
+
+    setBusy(true);
+    output.innerHTML = '<div class="banner banner-info">Simulating batch plan for ' + esc(repo) + '...</div>';
+    notes.textContent = '';
+
+    try {
+      const res = await fetch('/api/simulate?repo=' + encodeURIComponent(repo));
+      const data = await res.json();
+      if (!res.ok) {
+        output.innerHTML = '<div class="banner banner-err">Error: ' + esc(data.error || res.statusText || res.status) + '</div>';
+        return;
+      }
+
+      let html = '<div class="banner banner-info" style="font-weight:600;">' +
+                 'Batch Simulation for ' + esc(data.repo) + ': ' + data.included.length + ' PR(s) included, ' +
+                 data.excluded.length + ' excluded (Regen: ' + esc(data.regen) + ')' +
+                 '</div>';
+
+      if (data.included.length) {
+        html += '<div class="section-title" style="color:#3fb950;">Included in Batch (' + data.included.length + ')</div>';
+        html += '<table><thead><tr><th>PR</th><th>Update</th></tr></thead><tbody>' +
+          data.included.map(r =>
+            '<tr><td class="num">#' + r.number + '</td><td>' +
+            '<a style="color:inherit;text-decoration:none" href="https://github.com/' + esc(data.repo) + '/pull/' + r.number + '" target="_blank">' + esc(r.update) + '</a>' +
+            '</td></tr>').join('') +
+          '</tbody></table>';
+      }
+
+      if (data.excluded.length) {
+        html += '<div class="section-title" style="color:#d29922; margin-top:1.5rem;">Excluded (' + data.excluded.length + ')</div>';
+        html += '<table><thead><tr><th>PR</th><th>Reason</th></tr></thead><tbody>' +
+          data.excluded.map(e =>
+            '<tr><td class="num">#' + e.number + '</td><td style="color:#8b949e;">' + esc(e.reason) + '</td></tr>').join('') +
+          '</tbody></table>';
+      }
+
+      if (data.preview) {
+        html += '<div class="section-title" style="margin-top:2rem;">Generated PR Preview</div>';
+        html += '<div class="preview-box">' + esc(data.preview) + '</div>';
+      }
+
+      output.innerHTML = html;
+    } catch (err) {
+      output.innerHTML = '<div class="banner banner-err">Failed to connect: ' + esc(err.message) + '</div>';
+    } finally {
+      setBusy(false);
     }
-    output.innerHTML =
-      '<table><thead><tr><th>PR</th><th>update</th><th>files</th><th>status</th></tr></thead><tbody>' +
-      data.rows.map(r =>
-        '<tr><td class="num">#' + r.number + '</td><td>' +
-        '<a style="color:inherit;text-decoration:none" href="https://github.com/' + esc(data.repo) + '/pull/' + r.number + '">' + esc(r.update) + '</a>' +
-        '</td><td>' + r.files + '</td><td class="' + r.status + '">' + r.status + '</td></tr>').join('') +
-      '</tbody></table>';
-    let n = '';
-    if (data.duplicates.length)
-      n += 'duplicate dep (newest wins): ' + data.duplicates.map(g => g.map(i => '#' + i).join(', ')).join(' / ') + '\n';
-    if (data.conflicts.length)
-      n += 'conflicting pairs (kept out of batch): ' + data.conflicts.map(p => p[0] + '<->' + p[1]).join(' ');
-    notes.innerHTML = n;
   }
 </script>
 </body>

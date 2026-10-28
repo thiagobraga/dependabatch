@@ -48,7 +48,7 @@ pub fn conflicts_while_skipping(
 pub fn duplicate_groups(prs: &[PullRequest]) -> Vec<Vec<u64>> {
     let mut by_key: BTreeMap<(&str, &Option<String>), BTreeSet<u64>> = BTreeMap::new();
     for pr in prs {
-        if let crate::pr::Update::Bump(bump) = &pr.update {
+        for bump in pr.bumps() {
             by_key
                 .entry((bump.name.as_str(), &bump.path))
                 .or_default()

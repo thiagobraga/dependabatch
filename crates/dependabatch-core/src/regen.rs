@@ -8,6 +8,43 @@ pub fn has_npm_lock(dir: &Path) -> bool {
     dir.join("package-lock.json").is_file()
 }
 
+/// Find all directories within `root` that contain both `package.json` and `package-lock.json`.
+pub fn find_npm_lock_dirs(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if has_npm_lock(root) && root.join("package.json").is_file() {
+        dirs.push(root.to_path_buf());
+    }
+    // Check 1-2 levels of subdirectories (avoiding node_modules, .git, etc.)
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || name == "node_modules" || name == "target" {
+                    continue;
+                }
+                if has_npm_lock(&path) && path.join("package.json").is_file() {
+                    dirs.push(path);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Rebuild all `package-lock.json` files found in the repo with npm inside docker.
+pub fn regenerate_all_npm_locks(root: &Path, image: &str) -> Result<()> {
+    let dirs = find_npm_lock_dirs(root);
+    if dirs.is_empty() {
+        // Fall back to root if package.json exists
+        return regenerate_npm_lock(root, image);
+    }
+    for dir in dirs {
+        regenerate_npm_lock(&dir, image)?;
+    }
+    Ok(())
+}
+
 /// Rebuild `package-lock.json` from the edited manifests with npm.
 ///
 /// Runs inside an ephemeral docker container (`--rm`), mounted read-write only

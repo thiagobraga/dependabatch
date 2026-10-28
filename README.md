@@ -17,10 +17,10 @@ closes the originals with a `Superseded by #N` comment.
 | Stage | Feature | State |
 | ----- | ------- | ----- |
 | 1 | `dependabatch scan [owner/repo\|path]`: report open dependabot PRs and conflicts | shipping |
-| 2 | `dependabatch batch [owner/repo\|path]`: open the batch PR | shipping |
+| 2 | `dependabatch run [owner/repo\|path]`: open the batch PR (aliases: `pr`, `fix`, `batch`) | shipping |
 | 3 | `dependabatch merge` + supersede cleanup | planned |
 | 4 | `dependabatch.yml` per-repo config | planned |
-| 5 | GitHub Action wrapper | planned |
+| 5 | GitHub Action wrapper (`uses: thiagobraga/dependabatch@v0.3.0`) | shipping |
 | 6 | Web dashboard (axum + React) | planned |
 | 7 | Tauri desktop app | planned |
 
@@ -34,14 +34,14 @@ cd ~/projects/app && dependabatch scan
 dbatch scan ~/projects/app
 dbatch scan thiagobraga/dependabatch
 # look at the plan without touching anything
-dependabatch batch owner/repo --dry-run
-# open the batch PR: manifests applied, lockfile rebuilt in docker
-dependabatch batch owner/repo
+dependabatch run owner/repo --dry-run
+# open the batch PR (or use aliases: dbatch pr, dbatch fix, dbatch batch)
+dependabatch run owner/repo
 # local dashboard in your browser
 dependabatch serve --host 127.0.0.1 --port 8280
 ```
 
-`scan` and `batch` take an optional repository: `owner/name`, a GitHub URL, or
+`scan` and `run` (or `pr`/`fix`/`batch`) take an optional repository: `owner/name`, a GitHub URL, or
 a local path. Without one they use the current directory. Local paths resolve
 through the checkout's `origin` remote (falling back to the first remote).
 `dbatch` is a short alias for `dependabatch`.
@@ -78,6 +78,31 @@ install from a checkout with `cargo install --path crates/dependabatch-cli`.
 The batch PR body carries a table of every bump plus a `Supersedes: #12, #14`
 list, so GitHub cross-links the originals and reviewers see exactly what got
 absorbed.
+
+## GitHub Action
+
+Run dependabatch directly in GitHub Actions on a schedule or dispatch:
+
+```yaml
+name: dependabatch
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: thiagobraga/dependabatch@v0.3.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          command: run
+```
 
 ## Docker cleanup
 

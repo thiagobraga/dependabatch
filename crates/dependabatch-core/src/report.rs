@@ -2,7 +2,15 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 use crate::conflict;
+use crate::plan::{FileKind, classify_file};
 use crate::pr::{PullRequest, Update};
+
+fn manifest_or_lockfile_skipped(f: &crate::pr::PrFile) -> bool {
+    matches!(
+        classify_file(&f.filename),
+        FileKind::NpmLock | FileKind::NpmManifest
+    )
+}
 
 /// One row of the scan report.
 #[derive(Debug, Clone, Serialize)]
@@ -25,7 +33,7 @@ pub struct ScanReport {
 
 impl ScanReport {
     pub fn build(repo: &str, prs: &[PullRequest]) -> Self {
-        let conflicts = conflict::conflicts_within(prs);
+        let conflicts = conflict::conflicts_while_skipping(prs, &manifest_or_lockfile_skipped);
         let duplicates = conflict::duplicate_groups(prs);
         let conflicted = conflict::conflicted_numbers(&conflicts);
         let duplicated: BTreeSet<u64> = duplicates.iter().flatten().copied().collect();
@@ -37,9 +45,13 @@ impl ScanReport {
                 update: pr.describe(),
                 files: pr.files.len(),
                 status: match &pr.update {
-                    Update::Bump(_) if conflicted.contains(&pr.number) => "conflict".into(),
-                    Update::Bump(_) if duplicated.contains(&pr.number) => "duplicate".into(),
-                    Update::Bump(_) => "ready".into(),
+                    Update::Bump(_) | Update::Group { .. } if conflicted.contains(&pr.number) => {
+                        "conflict".into()
+                    }
+                    Update::Bump(_) | Update::Group { .. } if duplicated.contains(&pr.number) => {
+                        "duplicate".into()
+                    }
+                    Update::Bump(_) | Update::Group { .. } => "ready".into(),
                     Update::Other { .. } => "other".into(),
                 },
             })

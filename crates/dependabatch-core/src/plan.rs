@@ -11,9 +11,11 @@ pub enum FileKind {
     NpmLock,
     /// GitHub Actions workflow under `.github/workflows/`.
     Workflow,
+    /// Dockerfile or docker compose configuration.
+    Docker,
     /// Lockfile kinds whose regen is not implemented yet.
     PendingLock(String),
-    /// Anything else (dockerfiles, gradle, terraform, binlockless...).
+    /// Anything else (gradle, terraform, binlockless...).
     Other,
 }
 
@@ -25,6 +27,18 @@ pub fn classify_file(filename: &str) -> FileKind {
         "yarn.lock" | "pnpm-lock.yaml" | "pnpm-lock.yml" | "bun.lock" | "bun.lockb" => {
             FileKind::PendingLock(base.to_string())
         }
+        _ if base == "Dockerfile"
+            || base.starts_with("Dockerfile.")
+            || base.ends_with(".dockerfile")
+            || base == "compose.yml"
+            || base == "compose.yaml"
+            || base == "docker-compose.yml"
+            || base == "docker-compose.yaml"
+            || (base.starts_with("compose.")
+                && (base.ends_with(".yml") || base.ends_with(".yaml"))) =>
+        {
+            FileKind::Docker
+        }
         _ if filename.starts_with(".github/workflows/")
             && (base.ends_with(".yml") || base.ends_with(".yaml")) =>
         {
@@ -34,9 +48,12 @@ pub fn classify_file(filename: &str) -> FileKind {
     }
 }
 
-/// Lockfiles are regenerated from manifests, so overlap inside them is fine.
-fn lockfile_skipped(f: &PrFile) -> bool {
-    matches!(classify_file(&f.filename), FileKind::NpmLock)
+/// Lockfiles and semantic manifests are merged/regenerated, so overlap inside them is fine.
+fn manifest_or_lockfile_skipped(f: &PrFile) -> bool {
+    matches!(
+        classify_file(&f.filename),
+        FileKind::NpmLock | FileKind::NpmManifest
+    )
 }
 
 /// Why a PR stayed out of the batch.
@@ -89,15 +106,21 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
     // 1: shape and file types. Lockfile patch data may be missing entirely
     // (the API omits huge diffs); lockfiles are regenerated, not applied.
     for pr in prs {
-        if !matches!(&pr.update, Update::Bump(_)) {
-            exclude(pr, "not a single-dependency bump".into());
-            continue;
+        match &pr.update {
+            Update::Bump(_) | Update::Group { .. } => {}
+            Update::Other { .. } => {
+                exclude(pr, "unsupported update format".into());
+                continue;
+            }
         }
         let mut reject: Option<String> = None;
         for file in &pr.files {
             let kind = classify_file(&file.filename);
             match kind {
-                FileKind::NpmManifest | FileKind::NpmLock | FileKind::Workflow => {}
+                FileKind::NpmManifest
+                | FileKind::NpmLock
+                | FileKind::Workflow
+                | FileKind::Docker => {}
                 FileKind::PendingLock(name) => {
                     reject = Some(format!("lockfile `{name}` support is pending"));
                     break;
@@ -125,7 +148,7 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
     let mut by_key: std::collections::BTreeMap<(&str, &Option<String>), Vec<&PullRequest>> =
         std::collections::BTreeMap::new();
     for pr in &included {
-        if let Update::Bump(b) = &pr.update {
+        for b in pr.bumps() {
             by_key
                 .entry((b.name.as_str(), &b.path))
                 .or_default()
@@ -134,23 +157,30 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
     }
     let mut keep: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut drop_to: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
-    for group in by_key.into_values() {
+    for ((dep_name, _), group) in by_key {
         if group.len() == 1 {
             keep.insert(group[0].number);
             continue;
         }
+        let target_ver = |pr: &PullRequest| -> Option<String> {
+            pr.bumps()
+                .into_iter()
+                .find(|b| b.name == dep_name)
+                .map(|b| b.to.clone())
+        };
         let mut ranked: Vec<&PullRequest> = group.clone();
         ranked.sort_by(|a, b| {
-            version_key(bump_of(b).map(|b| b.to.as_str()))
-                .cmp(&version_key(bump_of(a).map(|b| b.to.as_str())))
+            version_key(target_ver(b).as_deref()).cmp(&version_key(target_ver(a).as_deref()))
         });
         let survivor = ranked[0].number;
         keep.insert(survivor);
         for loser in &ranked[1..] {
-            drop_to.insert(loser.number, survivor);
+            if loser.bumps().len() <= 1 {
+                drop_to.insert(loser.number, survivor);
+            }
         }
     }
-    included.retain(|pr| keep.contains(&pr.number));
+    included.retain(|pr| !drop_to.contains_key(&pr.number));
     for (loser, survivor) in drop_to {
         excluded.push(Excluded {
             number: loser,
@@ -158,8 +188,8 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
         });
     }
 
-    // 3: conflicts among survivors, ignoring regenerated lockfiles
-    let conflicts = conflict::conflicts_while_skipping(&included, &lockfile_skipped);
+    // 3: conflicts among survivors, ignoring regenerated lockfiles and semantic manifests
+    let conflicts = conflict::conflicts_while_skipping(&included, &manifest_or_lockfile_skipped);
     if !conflicts.is_empty() {
         let conflicted = conflict::conflicted_numbers(&conflicts);
         included.retain(|pr| !conflicted.contains(&pr.number));
@@ -217,13 +247,6 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
     }
 }
 
-fn bump_of(pr: &PullRequest) -> Option<&crate::pr::DepBump> {
-    match &pr.update {
-        Update::Bump(b) => Some(b),
-        _ => None,
-    }
-}
-
 /// Numeric-aware sort key so `1.10.0` beats `1.9.0`.
 fn version_key(version: Option<&str>) -> Vec<u64> {
     match version {
@@ -268,9 +291,7 @@ impl Plan {
 }
 
 fn count_bumps(prs: &[PullRequest]) -> usize {
-    prs.iter()
-        .filter(|pr| matches!(pr.update, Update::Bump(_)))
-        .count()
+    prs.iter().map(|pr| pr.bumps().len().max(1)).sum()
 }
 
 #[cfg(test)]
@@ -293,6 +314,7 @@ mod tests {
             number,
             title: match &update {
                 Update::Bump(b) => format!("Bump {} from {} to {}", b.name, b.from, b.to),
+                Update::Group { title, .. } => title.clone(),
                 Update::Other { title } => title.clone(),
             },
             author: DEPENDABOT_LOGIN.into(),
@@ -325,7 +347,11 @@ mod tests {
                 },
                 Vec::new(),
             ),
-            pr(2, bump("docker", "1", "2"), vec![file("Dockerfile", 1, 2)]),
+            pr(
+                2,
+                bump("gradle", "1", "2"),
+                vec![file("build.gradle", 1, 2)],
+            ),
             pr(3, bump("yarn", "1", "2"), vec![file("yarn.lock", 1, 2)]),
         ];
         let plan = select(&prs, false);
@@ -334,10 +360,29 @@ mod tests {
         assert!(
             reasons
                 .iter()
-                .any(|r| r.contains("not a single-dependency"))
+                .any(|r| r.contains("unsupported update format"))
         );
-        assert!(reasons.iter().any(|r| r.contains("Dockerfile")));
+        assert!(reasons.iter().any(|r| r.contains("build.gradle")));
         assert!(reasons.iter().any(|r| r.contains("pending")));
+    }
+
+    #[test]
+    fn docker_files_are_batched() {
+        let prs = vec![
+            pr(
+                1,
+                bump("node", "20", "22"),
+                vec![file(".docker/api/Dockerfile", 1, 2)],
+            ),
+            pr(
+                2,
+                bump("postgres", "15", "16"),
+                vec![file("compose.yml", 1, 2)],
+            ),
+        ];
+        let plan = select(&prs, false);
+        assert_eq!(plan.included.len(), 2);
+        assert!(plan.excluded.is_empty());
     }
 
     #[test]
@@ -389,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_conflicts_drop_both() {
+    fn manifest_deps_merge_cleanly_without_text_conflict() {
         let prs = vec![
             pr(
                 1,
@@ -400,6 +445,25 @@ mod tests {
                 2,
                 bump("axios", "1.6.0", "1.7.0"),
                 vec![file("package.json", 15, 5)],
+            ),
+        ];
+        let plan = select(&prs, false);
+        assert_eq!(plan.included.len(), 2);
+        assert!(plan.excluded.is_empty());
+    }
+
+    #[test]
+    fn workflow_conflicts_drop_both() {
+        let prs = vec![
+            pr(
+                1,
+                bump("actions/checkout", "3", "4"),
+                vec![file(".github/workflows/ci.yml", 10, 30)],
+            ),
+            pr(
+                2,
+                bump("actions/setup-node", "3", "4"),
+                vec![file(".github/workflows/ci.yml", 15, 5)],
             ),
         ];
         let plan = select(&prs, false);

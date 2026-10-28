@@ -20,7 +20,9 @@ pub struct DepBump {
 pub enum Update {
     /// A single dependency bump we understand well enough to batch.
     Bump(DepBump),
-    /// Anything else (grouped updates, security groups, unusual titles).
+    /// Grouped updates (e.g. multiple dependencies bumped together in one PR).
+    Group { title: String, bumps: Vec<DepBump> },
+    /// Anything else (grouped updates without parsed bumps, unusual titles).
     Other { title: String },
 }
 
@@ -57,13 +59,57 @@ pub struct PullRequest {
 
 impl PullRequest {
     pub fn new(number: u64, title: &str, author: &str, files: Vec<PrFile>) -> Self {
+        let update = match parse_update(title) {
+            Update::Bump(bump) => Update::Bump(bump),
+            _ => {
+                // Inspect files for package.json updates
+                let mut manifest_bumps = Vec::new();
+                for f in &files {
+                    if let Some(patch) = &f.patch {
+                        if f.filename.ends_with("package.json") {
+                            manifest_bumps.extend(crate::manifest::extract_package_json_bumps(
+                                &f.filename,
+                                patch,
+                            ));
+                        }
+                    }
+                }
+                if manifest_bumps.len() == 1 {
+                    Update::Bump(manifest_bumps.remove(0))
+                } else if !manifest_bumps.is_empty() {
+                    Update::Group {
+                        title: title.to_string(),
+                        bumps: manifest_bumps,
+                    }
+                } else if is_group_title(title) {
+                    Update::Group {
+                        title: title.to_string(),
+                        bumps: Vec::new(),
+                    }
+                } else {
+                    Update::Other {
+                        title: title.to_string(),
+                    }
+                }
+            }
+        };
+
         Self {
             number,
             title: title.to_string(),
             author: author.to_string(),
-            update: parse_update(title),
+            update,
             files,
             base_sha: None,
+        }
+    }
+
+    /// All dependency bumps inside this pull request.
+    pub fn bumps(&self) -> Vec<&DepBump> {
+        match &self.update {
+            Update::Bump(b) => vec![b],
+            Update::Group { bumps, .. } => bumps.iter().collect(),
+            Update::Other { .. } => Vec::new(),
         }
     }
 
@@ -71,27 +117,46 @@ impl PullRequest {
     pub fn describe(&self) -> String {
         match &self.update {
             Update::Bump(b) => format!("{} {} -> {}", b.name, b.from, b.to),
-            Update::Other { title } => {
-                let chars: Vec<char> = title.chars().collect();
-                if chars.len() > 40 {
-                    let head: String = chars.iter().take(37).collect();
-                    format!("{head}...")
+            Update::Group { title, bumps } => {
+                if bumps.is_empty() {
+                    truncate_title(title, 40)
+                } else if bumps.len() == 1 {
+                    format!("{} {} -> {}", bumps[0].name, bumps[0].from, bumps[0].to)
                 } else {
-                    title.clone()
+                    let names: Vec<&str> = bumps.iter().map(|b| b.name.as_str()).collect();
+                    let sample = if names.len() <= 2 {
+                        names.join(", ")
+                    } else {
+                        format!("{}, {} +{}", names[0], names[1], names.len() - 2)
+                    };
+                    format!("{} updates ({sample})", bumps.len())
                 }
             }
+            Update::Other { title } => truncate_title(title, 40),
         }
+    }
+}
+
+fn truncate_title(title: &str, max_len: usize) -> String {
+    let chars: Vec<char> = title.chars().collect();
+    if chars.len() > max_len {
+        let head: String = chars.iter().take(max_len - 3).collect();
+        format!("{head}...")
+    } else {
+        title.to_string()
     }
 }
 
 /// Classify a dependabot PR by its title.
 ///
-/// Handles the shapes dependabot itself produces:
+/// Handles shapes dependabot produces, including conventional commit prefixes:
 /// - `Bump vue from 3.4.0 to 3.5.0`
+/// - `chore(deps): bump qs from 6.16.0 to 6.17.0 in /api in the security group...`
 /// - `Bump @types/node from 22.10.2 to 22.10.3 in /packages/site`
 /// - everything else falls back to [`Update::Other`]
 pub fn parse_update(title: &str) -> Update {
-    match title.strip_prefix("Bump ").and_then(parse_bump) {
+    let stripped = strip_conventional_prefix(title);
+    match strip_bump_keyword(stripped).and_then(parse_bump) {
         Some(bump) => Update::Bump(bump),
         None => Update::Other {
             title: title.to_string(),
@@ -99,25 +164,75 @@ pub fn parse_update(title: &str) -> Update {
     }
 }
 
+fn strip_conventional_prefix(title: &str) -> &str {
+    let Some((prefix, rest)) = title.split_once(": ") else {
+        return title;
+    };
+    let prefix = prefix.trim();
+    let kind = prefix.split('(').next().unwrap_or(prefix);
+    if matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "chore" | "ci" | "fix" | "build" | "perf" | "refactor" | "style" | "test" | "deps"
+    ) {
+        rest.trim()
+    } else {
+        title
+    }
+}
+
+fn strip_bump_keyword(s: &str) -> Option<&str> {
+    if let Some(rest) = s.strip_prefix("Bump ") {
+        Some(rest)
+    } else if let Some(rest) = s.strip_prefix("bump ") {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+fn is_group_title(title: &str) -> bool {
+    let s = strip_conventional_prefix(title);
+    let s = strip_bump_keyword(s).unwrap_or(s);
+    s.starts_with("the ") && s.contains(" group")
+}
+
 fn parse_bump(rest: &str) -> Option<DepBump> {
     let (name, tail) = rest.split_once(" from ")?;
     if name.is_empty() || name.contains(char::is_whitespace) {
         return None;
     }
-    let (tail, path) = match tail.split_once(" in /") {
-        Some((t, p)) => (t, Some(format!("/{p}"))),
-        None => (tail, None),
-    };
-    let (from, to) = tail.trim_end().split_once(" to ")?;
-    if from.is_empty() || to.is_empty() || from.contains(char::is_whitespace) {
+    let (from, to_and_path) = tail.split_once(" to ")?;
+    if from.is_empty() || from.contains(char::is_whitespace) {
+        return None;
+    }
+    let (to, path) = parse_to_and_path(to_and_path);
+    if to.is_empty() || to.contains(char::is_whitespace) {
         return None;
     }
     Some(DepBump {
         name: name.to_string(),
         from: from.to_string(),
-        to: to.to_string(),
+        to,
         path,
     })
+}
+
+fn parse_to_and_path(s: &str) -> (String, Option<String>) {
+    let s = s.trim();
+    if let Some((to_part, after_in)) = s.split_once(" in /") {
+        let to = to_part.trim();
+        let dir = after_in.split_whitespace().next().unwrap_or(after_in);
+        let dir = dir.trim_end_matches('/');
+        (to.to_string(), Some(format!("/{dir}")))
+    } else {
+        let to = s
+            .split_once(" in the ")
+            .map(|(t, _)| t)
+            .or_else(|| s.split_once(" across ").map(|(t, _)| t))
+            .unwrap_or(s)
+            .trim();
+        (to.to_string(), None)
+    }
 }
 
 /// Extract hunk positions from one unified diff patch body.
@@ -219,6 +334,63 @@ mod tests {
                 title: "Fix typo".into()
             }
         );
+    }
+
+    #[test]
+    fn parses_conventional_commits_bump() {
+        let u = parse_update(
+            "chore(deps): bump qs from 6.16.0 to 6.17.0 in /api in the security group across 1 directory",
+        );
+        assert_eq!(
+            u,
+            Update::Bump(DepBump {
+                name: "qs".into(),
+                from: "6.16.0".into(),
+                to: "6.17.0".into(),
+                path: Some("/api".into()),
+            })
+        );
+
+        let u2 = parse_update(
+            "chore(deps-dev): bump happy-dom from 20.14.6 to 21.0.3 in /site in the minor-and-patch group across 1 directory",
+        );
+        assert_eq!(
+            u2,
+            Update::Bump(DepBump {
+                name: "happy-dom".into(),
+                from: "20.14.6".into(),
+                to: "21.0.3".into(),
+                path: Some("/site".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn pull_request_extracts_manifest_bumps_when_grouped() {
+        let diff = r#"
+--- a/app/package.json
++++ b/app/package.json
+@@ -10,2 +10,2 @@
+-    "react": "19.3.0",
++    "react": "19.3.1",
+-    "vite": "8.3.4",
++    "vite": "8.3.5",
+"#;
+        let files = vec![PrFile {
+            filename: "app/package.json".to_string(),
+            hunks: vec![],
+            patch: Some(diff.to_string()),
+        }];
+        let pr = PullRequest::new(
+            368,
+            "chore(deps): bump the minor-and-patch group across 1 directory with 2 updates",
+            DEPENDABOT_LOGIN,
+            files,
+        );
+        assert_eq!(pr.bumps().len(), 2);
+        assert_eq!(pr.bumps()[0].name, "react");
+        assert_eq!(pr.bumps()[1].name, "vite");
+        assert_eq!(pr.describe(), "2 updates (react, vite)");
     }
 
     #[test]
