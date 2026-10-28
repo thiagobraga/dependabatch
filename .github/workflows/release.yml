@@ -51,6 +51,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           tag="${GITHUB_REF_NAME}"
           gh release create "$tag" dist/* --generate-notes || gh release upload "$tag" dist/* --clobber
