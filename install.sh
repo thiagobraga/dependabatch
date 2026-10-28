@@ -91,9 +91,14 @@ fi
 
 tar -xzf "$tmp/$archive" -C "$tmp"
 
+bin="$tmp/$BIN_NAME"
+if [ ! -f "$bin" ]; then
+    fail "archive did not contain the $BIN_NAME binary"
+fi
+
 dest="${DEPENDABATCH_INSTALL:-$HOME/.local/bin}"
 mkdir -p "$dest"
-install -m 755 "$tmp/$BIN_NAME" "$dest/$BIN_NAME"
+install -m 755 "$bin" "$dest/$BIN_NAME"
 
 case ":$PATH:" in
     *":$dest:"*) ;;

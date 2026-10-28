@@ -30,8 +30,9 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         run: |
-          cp target/${{ matrix.target }}/release/dependabatch "dependabatch-${{ matrix.target }}"
-          tar -czf "dependabatch-${{ matrix.target }}.tar.gz" "dependabatch-${{ matrix.target }}"
+          mkdir pkg
+          cp target/${{ matrix.target }}/release/dependabatch pkg/dependabatch
+          tar -czf "dependabatch-${{ matrix.target }}.tar.gz" -C pkg dependabatch
           sha256sum "dependabatch-${{ matrix.target }}.tar.gz" > "dependabatch-${{ matrix.target }}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
