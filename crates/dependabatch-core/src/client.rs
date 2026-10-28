@@ -20,6 +20,27 @@ impl RepoSlug {
         }
     }
 
+    /// Extract `owner/name` from a GitHub git remote URL. Accepts
+    /// `git@github.com:owner/name.git`, `ssh://git@github.com/owner/name.git`,
+    /// `https://github.com/owner/name(.git)` and similar forms.
+    pub fn from_remote_url(url: &str) -> Result<Self> {
+        let url = url.trim();
+        let rest = if let Some((_, rest)) = url.split_once("://") {
+            // scheme://[user@]host[:port]/owner/name
+            rest.split_once('/').map(|(_, path)| path)
+        } else if let Some((host, path)) = url.split_once(':') {
+            // scp-like: [user@]host:owner/name
+            (!host.contains('/')).then_some(path)
+        } else {
+            None
+        };
+        let path = rest
+            .ok_or_else(|| anyhow!("unrecognized git remote url `{url}`"))?
+            .trim_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        Self::parse(path).with_context(|| format!("parsing git remote url `{url}`"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -241,5 +262,35 @@ impl GithubClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RepoSlug;
+
+    #[test]
+    fn parses_remote_urls() {
+        for url in [
+            "git@github.com:acme/app.git",
+            "git@github.com:acme/app",
+            "ssh://git@github.com/acme/app.git",
+            "https://github.com/acme/app.git",
+            "https://github.com/acme/app",
+            "https://github.com/acme/app/",
+            "https://x-access-token:abc@github.com/acme/app.git",
+        ] {
+            assert_eq!(
+                RepoSlug::from_remote_url(url).unwrap().as_str(),
+                "acme/app",
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_garbage_remotes() {
+        assert!(RepoSlug::from_remote_url("/some/local/path").is_err());
+        assert!(RepoSlug::from_remote_url("https://github.com/acme").is_err());
     }
 }

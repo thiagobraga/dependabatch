@@ -12,6 +12,7 @@ set -eu
 
 REPO="${DEPENDABATCH_REPO:-thiagobraga/dependabatch}"
 BIN_NAME="dependabatch"
+ALIAS_NAME="dbatch"
 VERSION="${DEPENDABATCH_VERSION:-latest}"
 
 say() {
@@ -99,6 +100,9 @@ fi
 dest="${DEPENDABATCH_INSTALL:-$HOME/.local/bin}"
 mkdir -p "$dest"
 install -m 755 "$bin" "$dest/$BIN_NAME"
+# short alias: dbatch -> dependabatch
+ln -sf "$BIN_NAME" "$dest/$ALIAS_NAME"
+say "installed $dest/$BIN_NAME (alias: $ALIAS_NAME)"
 
 case ":$PATH:" in
     *":$dest:"*) ;;

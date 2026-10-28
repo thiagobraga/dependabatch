@@ -16,8 +16,8 @@ closes the originals with a `Superseded by #N` comment.
 
 | Stage | Feature | State |
 | ----- | ------- | ----- |
-| 1 | `dependabatch scan owner/repo`: report open dependabot PRs and conflicts | shipping |
-| 2 | `dependabatch batch owner/repo`: open the batch PR | shipping |
+| 1 | `dependabatch scan [owner/repo\|path]`: report open dependabot PRs and conflicts | shipping |
+| 2 | `dependabatch batch [owner/repo\|path]`: open the batch PR | shipping |
 | 3 | `dependabatch merge` + supersede cleanup | planned |
 | 4 | `dependabatch.yml` per-repo config | planned |
 | 5 | GitHub Action wrapper | planned |
@@ -27,8 +27,12 @@ closes the originals with a `Superseded by #N` comment.
 ## Quickstart
 
 ```sh
-cargo install --path crates/dependabatch-cli
-dependabatch scan thiagobraga/dependabatch
+cargo install --path crates/dependabatch-cli   # installs `dependabatch` + `dbatch`
+# inside a checkout: scans the GitHub repo behind its git remote
+cd ~/projects/app && dependabatch scan
+# or point at a local checkout / an explicit repo
+dbatch scan ~/projects/app
+dbatch scan thiagobraga/dependabatch
 # look at the plan without touching anything
 dependabatch batch owner/repo --dry-run
 # open the batch PR: manifests applied, lockfile rebuilt in docker
@@ -37,12 +41,17 @@ dependabatch batch owner/repo
 dependabatch serve --host 127.0.0.1 --port 8280
 ```
 
+`scan` and `batch` take an optional repository: `owner/name`, a GitHub URL, or
+a local path. Without one they use the current directory. Local paths resolve
+through the checkout's `origin` remote (falling back to the first remote).
+`dbatch` is a short alias for `dependabatch`.
+
 Authentication resolution order: `GITHUB_TOKEN`, `GH_TOKEN`, then `gh auth token`.
 The token needs `repo` access (Contents: read/write for the batch stage).
 
 ## Install
 
-One-liner (linux + macOS, installs to `~/.local/bin`):
+One-liner (linux + macOS, installs `dependabatch` plus a `dbatch` symlink to `~/.local/bin`):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/thiagobraga/dependabatch/main/install.sh | sh
