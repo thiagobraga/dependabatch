@@ -33,7 +33,16 @@ pub fn batch_title(plan: &Plan) -> String {
     format!("chore(deps): batch bump {bumps} {noun} via dependabatch")
 }
 
-/// Batch PR body: table of every bump plus the superseded originals.
+/// Title + body preview for `--dry-run` consumers (CLI, web, action).
+pub fn preview(plan: &Plan) -> String {
+    let mut out = String::new();
+    out.push_str(&batch_title(plan));
+    out.push_str("\n\n");
+    out.push_str(&batch_body(plan));
+    out
+}
+
+/// Batch PR table of every bump plus the superseded originals.
 pub fn batch_body(plan: &Plan) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -381,5 +390,20 @@ mod tests {
         let diff = file_diff(&f);
         assert!(diff.starts_with("diff --git a/package.json a/package.json"));
         assert!(diff.contains("@@ -1,1 +1,2 @@"));
+    }
+
+    #[test]
+    fn preview_has_title_and_body() {
+        let prs = [
+            pr(1, "vue", vec![file("package.json")]),
+            pr(2, "axios", vec![file("package.json")]),
+        ];
+        let plan = select(&prs, false);
+        let preview = preview(&plan);
+        assert!(
+            preview.starts_with("chore(deps): batch bump 2 dependencies via dependabatch"),
+            "preview starts with the PR title"
+        );
+        assert!(preview.contains("Supersedes:** #1, #2"));
     }
 }

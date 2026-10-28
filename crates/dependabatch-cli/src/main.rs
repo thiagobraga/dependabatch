@@ -43,8 +43,8 @@ enum Command {
         /// Skip lockfile regeneration entirely (manifest edits only).
         #[arg(long)]
         no_regen: bool,
-        /// Print the plan and stop before touching anything.
-        #[arg(long)]
+        /// Print the plan and the PR preview, then stop (also -n).
+        #[arg(long, short = 'n')]
         dry_run: bool,
     },
 }
@@ -119,6 +119,10 @@ async fn run() -> Result<()> {
 
             println!("{}", plan.summary());
             if dry_run {
+                if !plan.included.is_empty() {
+                    println!("\n----- batch PR preview -----\n");
+                    println!("{}", batch::preview(&plan));
+                }
                 return Ok(());
             }
             if plan.included.is_empty() {

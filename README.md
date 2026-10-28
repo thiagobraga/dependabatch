@@ -42,7 +42,7 @@ The token needs `repo` access (Contents: read/write for the batch stage).
 
 | Flag | Meaning |
 | ---- | ------- |
-| `--dry-run` | print the plan (in/out per PR) and stop |
+| `-n` / `--dry-run` | print the plan (in/out per PR) plus a preview of the batch PR, then stop |
 | `--exclude zod` | keep a dependency out of the batch |
 | `--base main` | build from another base branch instead of the default |
 | `--regen-image node:24` | docker image used for lockfile regen |
