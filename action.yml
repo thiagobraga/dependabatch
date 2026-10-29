@@ -10,7 +10,7 @@ inputs:
     required: false
     default: ${{ github.token }}
   command:
-    description: 'dbatch command to run: run or scan'
+    description: 'dbatch command to run: run, scan, merge, or close'
     required: false
     default: 'run'
   repo:
@@ -37,6 +37,14 @@ inputs:
     description: 'Docker image for lockfile regeneration'
     required: false
     default: 'node:24'
+  pr:
+    description: 'Batch PR number for the close command (defaults to latest dependabatch/batch PR)'
+    required: false
+    default: ''
+  method:
+    description: 'Merge method for the merge command: squash, merge, or rebase'
+    required: false
+    default: ''
   version:
     description: 'dependabatch release version to install (defaults to latest)'
     required: false
@@ -60,30 +68,41 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
       run: |
+        CMD="${{ inputs.command }}"
         ARGS=()
-        if [ -n "${{ inputs.base }}" ]; then
-          ARGS+=(--base "${{ inputs.base }}")
-        fi
-        if [ -n "${{ inputs.exclude }}" ]; then
-          IFS=',' read -ra EXCLUDES <<< "${{ inputs.exclude }}"
-          for item in "${EXCLUDES[@]}"; do
-            trimmed="$(echo "$item" | xargs)"
-            if [ -n "$trimmed" ]; then
-              ARGS+=(--exclude "$trimmed")
-            fi
-          done
-        fi
-        if [ "${{ inputs.dry_run }}" = "true" ]; then
-          ARGS+=(--dry-run)
-        fi
-        if [ "${{ inputs.no_regen }}" = "true" ]; then
-          ARGS+=(--no-regen)
-        fi
-        if [ -n "${{ inputs.regen_image }}" ] && [ "${{ inputs.regen_image }}" != "node:24" ]; then
-          ARGS+=(--regen-image "${{ inputs.regen_image }}")
+        if [ "$CMD" = "run" ] || [ "$CMD" = "batch" ] || [ "$CMD" = "pr" ] || [ "$CMD" = "fix" ]; then
+          if [ -n "${{ inputs.base }}" ]; then
+            ARGS+=(--base "${{ inputs.base }}")
+          fi
+          if [ -n "${{ inputs.exclude }}" ]; then
+            IFS=',' read -ra EXCLUDES <<< "${{ inputs.exclude }}"
+            for item in "${EXCLUDES[@]}"; do
+              trimmed="$(echo "$item" | xargs)"
+              if [ -n "$trimmed" ]; then
+                ARGS+=(--exclude "$trimmed")
+              fi
+            done
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          if [ "${{ inputs.no_regen }}" = "true" ]; then
+            ARGS+=(--no-regen)
+          fi
+          if [ -n "${{ inputs.regen_image }}" ] && [ "${{ inputs.regen_image }}" != "node:24" ]; then
+            ARGS+=(--regen-image "${{ inputs.regen_image }}")
+          fi
+        elif [ "$CMD" = "close" ] || [ "$CMD" = "cleanup" ]; then
+          if [ -n "${{ inputs.pr }}" ]; then
+            ARGS+=(--pr "${{ inputs.pr }}")
+          fi
+        elif [ "$CMD" = "merge" ]; then
+          if [ -n "${{ inputs.method }}" ]; then
+            ARGS+=(--method "${{ inputs.method }}")
+          fi
         fi
         if [ -n "${{ inputs.repo }}" ]; then
           ARGS+=("${{ inputs.repo }}")
         fi
 
-        dbatch "${{ inputs.command }}" "${ARGS[@]}"
+        dbatch "$CMD" "${ARGS[@]}"

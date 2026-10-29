@@ -92,7 +92,7 @@ pub fn regenerate_npm_lock(dir: &Path, image: &str) -> Result<()> {
 
 fn docker_available() -> Result<()> {
     let output = Command::new("docker")
-        .args(["version", "--format", "{{.ServerVersion}}"])
+        .args(["version", "--format", "{{.Server.Version}}"])
         .output()
         .context("docker binary not found on PATH")?;
     if output.status.success() {

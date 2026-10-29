@@ -55,6 +55,25 @@ enum Command {
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+    /// Merge the open batch PR and close all superseded dependabot PRs.
+    Merge {
+        /// `owner/name`, a GitHub URL, or a local git checkout path
+        /// (defaults to the current directory).
+        repo: Option<String>,
+        /// Merge method: squash, merge, or rebase.
+        #[arg(long, default_value = "squash")]
+        method: String,
+    },
+    /// Close superseded dependabot PRs referenced by the latest (or given) batch PR.
+    #[command(name = "close", visible_aliases = ["cleanup"])]
+    Close {
+        /// `owner/name`, a GitHub URL, or a local git checkout path
+        /// (defaults to the current directory).
+        repo: Option<String>,
+        /// Explicit batch PR number (defaults to the latest `dependabatch/batch` PR).
+        #[arg(long)]
+        pr: Option<u64>,
+    },
     /// Run a tiny local dashboard: scan repos from the browser.
     Serve {
         /// Address to bind.
@@ -153,7 +172,40 @@ async fn run() -> Result<()> {
             println!("applied files : {}", result.applied_files);
             Ok(())
         }
+        Command::Merge { repo, method } => {
+            let slug = resolve_repo(repo.as_deref())?;
+            let token = token()?;
+            let res = batch::merge(&slug, &token, &method).await?;
+            println!("merged PR     : #{} ({})", res.batch_pr, res.pr_url);
+            println!("closed PRs    : {}", format_pr_list(&res.closed));
+            if !res.already_closed.is_empty() {
+                println!("already closed: {}", format_pr_list(&res.already_closed));
+            }
+            Ok(())
+        }
+        Command::Close { repo, pr } => {
+            let slug = resolve_repo(repo.as_deref())?;
+            let token = token()?;
+            let res = batch::close_superseded(&slug, &token, pr).await?;
+            println!("batch PR      : #{}", res.batch_pr);
+            println!("closed PRs    : {}", format_pr_list(&res.closed));
+            if !res.already_closed.is_empty() {
+                println!("already closed: {}", format_pr_list(&res.already_closed));
+            }
+            Ok(())
+        }
         Command::Serve { host, port } => serve(host, port).await,
+    }
+}
+
+fn format_pr_list(prs: &[u64]) -> String {
+    if prs.is_empty() {
+        "none".to_string()
+    } else {
+        prs.iter()
+            .map(|n| format!("#{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

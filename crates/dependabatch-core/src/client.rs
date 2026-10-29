@@ -46,6 +46,15 @@ impl RepoSlug {
     }
 }
 
+/// Metadata for a batch pull request found on GitHub.
+#[derive(Debug, Clone)]
+pub struct BatchPullInfo {
+    pub number: u64,
+    pub html_url: String,
+    pub body: String,
+    pub merged: bool,
+}
+
 /// Minimal typed wrapper over the GitHub REST API used by dependabatch.
 pub struct GithubClient {
     http: reqwest::Client,
@@ -229,10 +238,39 @@ impl GithubClient {
 
     /// Open PR on `owner:branch`, if any.
     pub async fn find_open_pull(&self, repo: &RepoSlug, head: &str) -> Result<Option<String>> {
+        Ok(self
+            .find_batch_pull(repo, head, "open")
+            .await?
+            .map(|p| p.html_url))
+    }
+
+    /// Fetch a pull request by number.
+    pub async fn get_pull(&self, repo: &RepoSlug, number: u64) -> Result<BatchPullInfo> {
+        let pr: Value = self
+            .get(
+                &format!(
+                    "https://api.github.com/repos/{}/pulls/{number}",
+                    repo.as_str()
+                ),
+                &[],
+            )
+            .await?;
+        parse_batch_pull(&pr)
+    }
+
+    /// Latest PR on `owner:branch` with the given `state` (`open`, `closed`, `all`).
+    pub async fn find_batch_pull(
+        &self,
+        repo: &RepoSlug,
+        head: &str,
+        state: &str,
+    ) -> Result<Option<BatchPullInfo>> {
         let owner = repo.as_str().split('/').next().unwrap_or_default();
         let query = vec![
-            ("state", "open".to_string()),
+            ("state", state.to_string()),
             ("head", format!("{owner}:{head}")),
+            ("sort", "updated".to_string()),
+            ("direction", "desc".to_string()),
         ];
         let batch: Vec<Value> = self
             .get(
@@ -240,11 +278,85 @@ impl GithubClient {
                 &query,
             )
             .await?;
-        Ok(batch
-            .first()
-            .and_then(|pr| pr.pointer("/html_url"))
+        match batch.first() {
+            Some(pr) => Ok(Some(parse_batch_pull(pr)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Merge a pull request (`squash`, `merge`, or `rebase`).
+    pub async fn merge_pull(&self, repo: &RepoSlug, number: u64, merge_method: &str) -> Result<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/pulls/{number}/merge",
+            repo.as_str()
+        );
+        let payload = serde_json::json!({
+            "merge_method": merge_method,
+        });
+        self.http
+            .put(&url)
+            .bearer_auth(&self.token)
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&payload)
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("merging pull request #{number} failed"))?;
+        Ok(())
+    }
+
+    /// Comment `Superseded by #<batch_number>` and close an open PR.
+    /// Returns `Ok(true)` if it was open and closed, `Ok(false)` if already closed.
+    pub async fn close_superseded_pull(
+        &self,
+        repo: &RepoSlug,
+        number: u64,
+        batch_number: u64,
+    ) -> Result<bool> {
+        let pr_url = format!(
+            "https://api.github.com/repos/{}/pulls/{number}",
+            repo.as_str()
+        );
+        let pr: Value = self.get(&pr_url, &[]).await?;
+        let state = pr
+            .pointer("/state")
             .and_then(Value::as_str)
-            .map(str::to_string))
+            .unwrap_or_default();
+        if state != "open" {
+            return Ok(false);
+        }
+
+        let comment_url = format!(
+            "https://api.github.com/repos/{}/issues/{number}/comments",
+            repo.as_str()
+        );
+        let comment = serde_json::json!({
+            "body": format!("Superseded by #{batch_number}.")
+        });
+        self.http
+            .post(&comment_url)
+            .bearer_auth(&self.token)
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&comment)
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("commenting on PR #{number} failed"))?;
+
+        let close_payload = serde_json::json!({
+            "state": "closed"
+        });
+        self.http
+            .patch(&pr_url)
+            .bearer_auth(&self.token)
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&close_payload)
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("closing PR #{number} failed"))?;
+
+        Ok(true)
     }
 
     async fn get<T: serde::de::DeserializeOwned>(
@@ -263,6 +375,33 @@ impl GithubClient {
             .error_for_status()?;
         Ok(resp.json().await?)
     }
+}
+
+fn parse_batch_pull(pr: &Value) -> Result<BatchPullInfo> {
+    let number = pr
+        .pointer("/number")
+        .and_then(Value::as_u64)
+        .context("pull request without number")?;
+    let html_url = pr
+        .pointer("/html_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let body = pr
+        .pointer("/body")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let merged = pr
+        .pointer("/merged_at")
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    Ok(BatchPullInfo {
+        number,
+        html_url,
+        body,
+        merged,
+    })
 }
 
 #[cfg(test)]

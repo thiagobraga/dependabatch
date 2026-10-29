@@ -10,13 +10,17 @@ on:
         description: 'Dry run (preview without opening PR)'
         type: boolean
         default: false
+  pull_request:
+    types: [closed]
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
 
 jobs:
   batch:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,3 +30,18 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           command: run
           dry_run: ${{ inputs.dry_run == true && 'true' || 'false' }}
+
+  close-superseded:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.ref == 'dependabatch/batch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Close superseded Dependabot PRs
+        uses: ./
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          command: close
+          pr: ${{ github.event.pull_request.number }}

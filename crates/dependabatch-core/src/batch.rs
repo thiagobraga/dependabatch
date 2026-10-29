@@ -22,6 +22,23 @@ pub struct BatchResult {
     pub bumps: usize,
 }
 
+/// Outcome of closing superseded dependabot PRs for a batch PR.
+#[derive(Debug, Serialize)]
+pub struct CloseResult {
+    pub batch_pr: u64,
+    pub closed: Vec<u64>,
+    pub already_closed: Vec<u64>,
+}
+
+/// Outcome of merging the batch PR and closing superseded PRs.
+#[derive(Debug, Serialize)]
+pub struct MergeResult {
+    pub batch_pr: u64,
+    pub pr_url: String,
+    pub closed: Vec<u64>,
+    pub already_closed: Vec<u64>,
+}
+
 /// Batch PR title, conventional-commits style.
 pub fn batch_title(plan: &Plan) -> String {
     let bumps = plan.included.len();
@@ -56,17 +73,121 @@ pub fn batch_body(plan: &Plan) -> String {
     let list = plan
         .included
         .iter()
-        .map(|pr| format!("#{}", pr.number))
+        .map(|pr| format!("Close #{}", pr.number))
         .collect::<Vec<_>>()
         .join(", ");
-    out.push_str(&format!(
-        "\n**Supersedes:** {list}. The originals close as superseded when this PR merges.\n"
-    ));
+    out.push_str(&format!("\n{list}\n"));
     out.push_str(&format!(
         "\n---\n<sub>Batched by [dependabatch](https://github.com/thiagobraga/dependabatch) v{}.</sub>\n",
         env!("CARGO_PKG_VERSION")
     ));
     out
+}
+
+/// Parse superseded PR numbers from a batch PR body (`Close #12, Close #14` or
+/// `**Supersedes:** #12, #14`).
+pub fn parse_superseded_prs(body: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if !(lower.starts_with("close ")
+            || lower.starts_with("closes ")
+            || lower.starts_with("**supersedes:**")
+            || lower.starts_with("supersedes:"))
+        {
+            continue;
+        }
+        let mut rest = trimmed;
+        while let Some(hash_idx) = rest.find('#') {
+            rest = &rest[hash_idx + 1..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(num) = digits.parse::<u64>() {
+                if !out.contains(&num) {
+                    out.push(num);
+                }
+            }
+            rest = &rest[digits.len()..];
+        }
+    }
+    out
+}
+
+/// Close open dependabot PRs listed in the latest (or specified) batch PR.
+pub async fn close_superseded(
+    repo: &RepoSlug,
+    token: &str,
+    pr_number: Option<u64>,
+) -> Result<CloseResult> {
+    let client = GithubClient::new(token)?;
+    let batch_pr = match pr_number {
+        Some(n) => client.get_pull(repo, n).await?,
+        None => client
+            .find_batch_pull(repo, BATCH_BRANCH, "all")
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no `{BATCH_BRANCH}` pull request found in {}",
+                    repo.as_str()
+                )
+            })?,
+    };
+
+    let targets = parse_superseded_prs(&batch_pr.body);
+    if targets.is_empty() {
+        bail!(
+            "batch PR #{} contains no superseded PR references",
+            batch_pr.number
+        );
+    }
+
+    let mut closed = Vec::new();
+    let mut already_closed = Vec::new();
+    for num in targets {
+        if client
+            .close_superseded_pull(repo, num, batch_pr.number)
+            .await?
+        {
+            eprintln!(
+                "[dependabatch] closed #{num} (superseded by #{})",
+                batch_pr.number
+            );
+            closed.push(num);
+        } else {
+            already_closed.push(num);
+        }
+    }
+
+    Ok(CloseResult {
+        batch_pr: batch_pr.number,
+        closed,
+        already_closed,
+    })
+}
+
+/// Merge the open `dependabatch/batch` PR and close all superseded PRs.
+pub async fn merge(repo: &RepoSlug, token: &str, merge_method: &str) -> Result<MergeResult> {
+    let client = GithubClient::new(token)?;
+    let batch_pr = client
+        .find_batch_pull(repo, BATCH_BRANCH, "open")
+        .await?
+        .ok_or_else(|| anyhow!("no open `{BATCH_BRANCH}` PR found in {}", repo.as_str()))?;
+
+    eprintln!(
+        "[dependabatch] merging #{} ({}) via {merge_method}",
+        batch_pr.number, batch_pr.html_url
+    );
+    client
+        .merge_pull(repo, batch_pr.number, merge_method)
+        .await?;
+
+    let close_res = close_superseded(repo, token, Some(batch_pr.number)).await?;
+    Ok(MergeResult {
+        batch_pr: batch_pr.number,
+        pr_url: batch_pr.html_url,
+        closed: close_res.closed,
+        already_closed: close_res.already_closed,
+    })
 }
 
 /// Full pipeline: clone base, apply manifest/workflow patches, regenerate the
@@ -426,9 +547,18 @@ mod tests {
         ];
         let plan = select(&prs, false);
         let body = batch_body(&plan);
-        assert!(body.contains("Supersedes:** #1, #2"));
+        assert!(body.contains("Close #1, Close #2"));
         assert!(body.contains("| #1 | `vue 1.0.0 -> 1.1.0` |"));
-        assert!(body.contains("close as superseded"));
+        assert_eq!(parse_superseded_prs(&body), vec![1, 2]);
+    }
+
+    #[test]
+    fn parses_legacy_supersedes_and_close_lines() {
+        let legacy = "| #10 | `foo` |\n\n**Supersedes:** #10, #12. The originals close.\n";
+        assert_eq!(parse_superseded_prs(legacy), vec![10, 12]);
+
+        let closes = "Close #333, Close #334, Closes #361\n";
+        assert_eq!(parse_superseded_prs(closes), vec![333, 334, 361]);
     }
 
     #[test]
@@ -465,6 +595,6 @@ mod tests {
             preview.starts_with("chore(deps): batch bump 2 dependencies via dependabatch"),
             "preview starts with the PR title"
         );
-        assert!(preview.contains("Supersedes:** #1, #2"));
+        assert!(preview.contains("Close #1, Close #2"));
     }
 }

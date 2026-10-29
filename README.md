@@ -18,9 +18,9 @@ closes the originals with a `Superseded by #N` comment.
 | ----- | ------- | ----- |
 | 1 | `dependabatch scan [owner/repo\|path]`: report open dependabot PRs and conflicts | shipping |
 | 2 | `dependabatch run [owner/repo\|path]`: open the batch PR (aliases: `pr`, `fix`, `batch`) | shipping |
-| 3 | `dependabatch merge` + supersede cleanup | planned |
+| 3 | `dependabatch merge` / `dependabatch close`: merge and close superseded PRs | shipping |
 | 4 | `dependabatch.yml` per-repo config | planned |
-| 5 | GitHub Action wrapper (`uses: thiagobraga/dependabatch@v0.3.0`) | shipping |
+| 5 | GitHub Action wrapper (`uses: thiagobraga/dependabatch@v0.4.0`) | shipping |
 | 6 | Web dashboard (axum + React) | planned |
 | 7 | Tauri desktop app | planned |
 
@@ -37,6 +37,10 @@ dbatch scan thiagobraga/dependabatch
 dependabatch run owner/repo --dry-run
 # open the batch PR (or use aliases: dbatch pr, dbatch fix, dbatch batch)
 dependabatch run owner/repo
+# merge the open batch PR and close superseded dependabot PRs
+dependabatch merge owner/repo
+# or close superseded PRs after merging on GitHub
+dependabatch close owner/repo
 # local dashboard in your browser
 dependabatch serve --host 127.0.0.1 --port 8280
 ```
@@ -75,13 +79,14 @@ install from a checkout with `cargo install --path crates/dependabatch-cli`.
 | `--regen-image node:24` | docker image used for lockfile regen |
 | `--no-regen` | skip lockfile regeneration (manifest edits only) |
 
-The batch PR body carries a table of every bump plus a `Supersedes: #12, #14`
-list, so GitHub cross-links the originals and reviewers see exactly what got
-absorbed.
+The batch PR body carries a table of every bump plus `Close #12, Close #14`,
+so GitHub cross-links the originals and `dependabatch close` / `dependabatch merge`
+knows which PRs to close.
 
 ## GitHub Action
 
-Run dependabatch directly in GitHub Actions on a schedule or dispatch:
+Run dependabatch directly in GitHub Actions on a schedule or dispatch, and
+automatically close superseded PRs when the batch PR merges:
 
 ```yaml
 name: dependabatch
@@ -89,19 +94,39 @@ on:
   schedule:
     - cron: '0 6 * * 1-5'
   workflow_dispatch:
+  pull_request:
+    types: [closed]
 
 jobs:
   batch:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: thiagobraga/dependabatch@v0.3.0
+      - uses: thiagobraga/dependabatch@v0.4.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           command: run
+
+  close-superseded:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.ref == 'dependabatch/batch'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: thiagobraga/dependabatch@v0.4.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          command: close
+          pr: ${{ github.event.pull_request.number }}
 ```
 
 ## Docker cleanup
