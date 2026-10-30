@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::header::ACCEPT;
 use serde_json::Value;
 
+use crate::alerts::CodeScanningAlert;
 use crate::pr::{DEPENDABOT_LOGIN, PrFile, PullRequest, parse_hunks_from_patch};
 
 /// `owner/name` repository identifier.
@@ -357,6 +358,70 @@ impl GithubClient {
             .with_context(|| format!("closing PR #{number} failed"))?;
 
         Ok(true)
+    }
+
+    /// Paginated list of code-scanning alerts for a repository.
+    pub async fn code_scanning_alerts(
+        &self,
+        repo: &RepoSlug,
+        state: &str,
+        git_ref: Option<&str>,
+        severity: Option<&str>,
+    ) -> Result<Vec<CodeScanningAlert>> {
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        let url = format!(
+            "https://api.github.com/repos/{}/code-scanning/alerts",
+            repo.as_str()
+        );
+        loop {
+            let mut query = vec![
+                ("state", state.to_string()),
+                ("per_page", "100".to_string()),
+                ("page", page.to_string()),
+            ];
+            if let Some(r) = git_ref {
+                query.push(("ref", r.to_string()));
+            }
+            if let Some(sev) = severity {
+                query.push(("severity", sev.to_string()));
+            }
+            let batch: Vec<Value> = self
+                .get(&url, &query)
+                .await
+                .with_context(|| format!("fetching code-scanning alerts for {}", repo.as_str()))?;
+            let count = batch.len();
+            for item in batch {
+                if let Some(alert) = CodeScanningAlert::from_json(&item) {
+                    out.push(alert);
+                }
+            }
+            if count < 100 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    /// Fetch a single code-scanning alert by number.
+    pub async fn code_scanning_alert(
+        &self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<CodeScanningAlert> {
+        let url = format!(
+            "https://api.github.com/repos/{}/code-scanning/alerts/{number}",
+            repo.as_str()
+        );
+        let raw: Value = self.get(&url, &[]).await.with_context(|| {
+            format!(
+                "fetching code-scanning alert #{number} in {}",
+                repo.as_str()
+            )
+        })?;
+        CodeScanningAlert::from_json(&raw)
+            .ok_or_else(|| anyhow!("malformed code-scanning alert #{number} response"))
     }
 
     async fn get<T: serde::de::DeserializeOwned>(

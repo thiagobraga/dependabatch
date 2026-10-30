@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use dependabatch_core::alert_fix;
+use dependabatch_core::alerts::{AlertsReport, normalize_git_ref};
 use dependabatch_core::batch;
 use dependabatch_core::client::{GithubClient, RepoSlug};
 use dependabatch_core::plan::{RegenPlan, select};
@@ -22,9 +24,26 @@ struct Cli {
     version: Option<bool>,
 }
 
+/// Shared options for querying GitHub code-scanning alerts.
+#[derive(Args, Debug, Clone)]
+struct AlertFilterArgs {
+    /// Alert state: open, fixed, dismissed, or closed.
+    #[arg(long, default_value = "open")]
+    state: String,
+    /// Filter alerts by severity (critical, high, medium, low, error, warning, note).
+    #[arg(long)]
+    severity: Option<String>,
+    /// Git ref or branch for alerts (defaults to the repo default branch; pass `all` to omit ref filter).
+    #[arg(long = "ref")]
+    git_ref: Option<String>,
+    /// Show full details for a single code-scanning alert number.
+    #[arg(long)]
+    alert: Option<u64>,
+}
+
 #[derive(Subcommand)]
 enum Command {
-    /// List open dependabot PRs with conflict analysis (dry run).
+    /// List open dependabot PRs with conflict analysis (or code-scanning alerts with `--alerts`).
     Scan {
         /// `owner/name`, a GitHub URL, or a local git checkout path
         /// (defaults to the current directory).
@@ -32,14 +51,43 @@ enum Command {
         /// Print machine readable JSON.
         #[arg(long)]
         json: bool,
+        /// Scan GitHub code-scanning alerts instead of dependabot PRs.
+        #[arg(short = 'a', long = "alerts", visible_alias = "code-scanning")]
+        alerts: bool,
+        #[command(flatten)]
+        filter: AlertFilterArgs,
     },
-    /// Apply clean dependabot PRs to a batch branch and open the superseding PR.
+    /// List or inspect GitHub code-scanning alerts for a repository.
+    #[command(name = "alerts", visible_aliases = ["code-scanning", "cs"])]
+    Alerts {
+        /// `owner/name`, a GitHub URL, or a local git checkout path
+        /// (defaults to the current directory).
+        repo: Option<String>,
+        /// Print machine readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Fix the matched code-scanning alert(s) and open a PR.
+        #[arg(long)]
+        fix: bool,
+        /// Print the fix plan and PR preview without touching anything (with `--fix`).
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+        /// Filter alerts by file/target path substring.
+        #[arg(long)]
+        path: Option<String>,
+        /// AI CLI fallback mode when fixing alerts: auto, claude, gemini, or none.
+        #[arg(long, default_value = "auto")]
+        ai: String,
+        #[command(flatten)]
+        filter: AlertFilterArgs,
+    },
+    /// Apply clean dependabot PRs to a batch branch (or fix code-scanning alerts with `-a`) and open a PR.
     #[command(name = "run", visible_aliases = ["batch", "pr", "fix"])]
     Run {
         /// `owner/name`, a GitHub URL, or a local git checkout path
         /// (defaults to the current directory).
         repo: Option<String>,
-        /// Base branch to fork the batch from (defaults to the repo default).
+        /// Base branch to fork from (defaults to the repo default).
         #[arg(long)]
         base: Option<String>,
         /// Dependency names to keep out of the batch.
@@ -54,6 +102,21 @@ enum Command {
         /// Print the plan and the PR preview, then stop (also -n).
         #[arg(long, short = 'n')]
         dry_run: bool,
+        /// Fix GitHub code-scanning alerts instead of batching dependabot PRs (also -a).
+        #[arg(short = 'a', long = "alerts", visible_alias = "code-scanning")]
+        alerts: bool,
+        /// Fix a single code-scanning alert by number (implies `--alerts`).
+        #[arg(long)]
+        alert: Option<u64>,
+        /// Filter code-scanning alerts by severity (critical, high, medium, low, warning, error).
+        #[arg(long)]
+        severity: Option<String>,
+        /// Filter code-scanning alerts by path/target substring.
+        #[arg(long)]
+        path: Option<String>,
+        /// AI CLI fallback mode when fixing alerts: auto, claude, gemini, or none.
+        #[arg(long, default_value = "auto")]
+        ai: String,
     },
     /// Merge the open batch PR and close all superseded dependabot PRs.
     Merge {
@@ -96,7 +159,20 @@ pub async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Scan { repo, json } => {
+        Command::Scan {
+            repo,
+            json,
+            alerts,
+            filter,
+        } => {
+            if alerts
+                || filter.alert.is_some()
+                || filter.severity.is_some()
+                || filter.git_ref.is_some()
+                || filter.state != "open"
+            {
+                return run_alerts(repo.as_deref(), json, &filter).await;
+            }
             let slug = resolve_repo(repo.as_deref())?;
             let client = GithubClient::new(&token()?)?;
             let prs = client.open_dependabot_prs(&slug).await?;
@@ -108,6 +184,31 @@ async fn run() -> Result<()> {
             }
             Ok(())
         }
+        Command::Alerts {
+            repo,
+            json,
+            fix,
+            dry_run,
+            path,
+            ai,
+            filter,
+        } => {
+            if fix {
+                return run_fix_alerts(
+                    repo.as_deref(),
+                    None,
+                    filter.alert,
+                    filter.severity.as_deref(),
+                    path.as_deref(),
+                    "node:24",
+                    false,
+                    dry_run,
+                    &ai,
+                )
+                .await;
+            }
+            run_alerts(repo.as_deref(), json, &filter).await
+        }
         Command::Run {
             repo,
             base,
@@ -115,7 +216,26 @@ async fn run() -> Result<()> {
             regen_image,
             no_regen,
             dry_run,
+            alerts,
+            alert,
+            severity,
+            path,
+            ai,
         } => {
+            if alerts || alert.is_some() || severity.is_some() || path.is_some() {
+                return run_fix_alerts(
+                    repo.as_deref(),
+                    base.as_deref(),
+                    alert,
+                    severity.as_deref(),
+                    path.as_deref(),
+                    &regen_image,
+                    no_regen,
+                    dry_run,
+                    &ai,
+                )
+                .await;
+            }
             let slug = resolve_repo(repo.as_deref())?;
             let token = token()?;
             let client = GithubClient::new(&token)?;
@@ -196,6 +316,120 @@ async fn run() -> Result<()> {
         }
         Command::Serve { host, port } => serve(host, port).await,
     }
+}
+
+async fn run_alerts(repo: Option<&str>, json: bool, filter: &AlertFilterArgs) -> Result<()> {
+    let slug = resolve_repo(repo)?;
+    let client = GithubClient::new(&token()?)?;
+
+    if let Some(number) = filter.alert {
+        let alert = client.code_scanning_alert(&slug, number).await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&alert)?);
+        } else {
+            println!("{}", alert.render_detail(slug.as_str()));
+        }
+        return Ok(());
+    }
+
+    let resolved_ref = match filter.git_ref.as_deref() {
+        Some("all" | "*") => None,
+        Some(r) => Some(normalize_git_ref(r)),
+        None => {
+            let branch = client.default_branch(&slug).await?;
+            Some(normalize_git_ref(&branch))
+        }
+    };
+
+    let alerts = client
+        .code_scanning_alerts(
+            &slug,
+            &filter.state,
+            resolved_ref.as_deref(),
+            filter.severity.as_deref(),
+        )
+        .await?;
+    let report = AlertsReport::build(
+        slug.as_str(),
+        &filter.state,
+        resolved_ref,
+        filter.severity.clone(),
+        alerts,
+    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", report.render());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fix_alerts(
+    repo: Option<&str>,
+    base: Option<&str>,
+    single_alert: Option<u64>,
+    severity: Option<&str>,
+    path_filter: Option<&str>,
+    regen_image: &str,
+    no_regen: bool,
+    dry_run: bool,
+    ai_mode: &str,
+) -> Result<()> {
+    let slug = resolve_repo(repo)?;
+    let token = token()?;
+    let client = GithubClient::new(&token)?;
+    let base_branch = match base {
+        Some(b) => b.to_string(),
+        None => client.default_branch(&slug).await?,
+    };
+    let git_ref = normalize_git_ref(&base_branch);
+
+    let alerts = if let Some(num) = single_alert {
+        vec![client.code_scanning_alert(&slug, num).await?]
+    } else {
+        let fetched = client
+            .code_scanning_alerts(&slug, "open", Some(&git_ref), severity)
+            .await?;
+        let report = AlertsReport::build(
+            slug.as_str(),
+            "open",
+            Some(git_ref),
+            severity.map(str::to_string),
+            fetched,
+        );
+        report.alerts
+    };
+
+    let plan = alert_fix::select_alert_fixes(&alerts, single_alert, path_filter);
+    println!("{}", plan.summary());
+    if dry_run {
+        if !plan.items.is_empty() {
+            println!("\n----- alert fix PR preview -----\n");
+            println!("{}", alert_fix::preview(&plan, &slug));
+        }
+        return Ok(());
+    }
+    if plan.items.is_empty() {
+        bail!("nothing to fix");
+    }
+
+    let result = alert_fix::run(
+        &plan,
+        &slug,
+        Some(&base_branch),
+        &token,
+        regen_image,
+        no_regen,
+        ai_mode,
+    )
+    .await?;
+    println!();
+    println!("alert fix PR  : {}", result.pr_url);
+    println!("branch        : {}", result.branch);
+    println!("fixed targets : {}", result.fixed_items);
+    println!("alerts        : {}", format_pr_list(&result.alert_numbers));
+    Ok(())
 }
 
 fn format_pr_list(prs: &[u64]) -> String {
