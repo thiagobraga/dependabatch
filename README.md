@@ -103,8 +103,13 @@ to query GitHub's code-scanning alerts API with automatic pagination and path gr
 | `--ref <git-ref>` | branch or git ref (defaults to repo default branch; pass `all` for all refs) |
 | `--alert <number>` | inspect (`scan` / `alerts`) or fix (`fix` / `alerts --fix`) a single alert |
 | `--path <substring>` | filter alerts by file/target path when fixing |
-| `--ai <mode>` | AI CLI fallback (`auto`, `claude`, `gemini`, `none`) for source/container fixes |
+| `--ai <mode>` | AI CLI fallback (`none` by default; opt in with `auto`, `claude`, or `gemini`) |
 | `--json` | output machine-readable JSON |
+
+Container fixes only propose newer matching image tags within the same major version.
+They do not verify that an alert is resolved, and embedded binaries such as `gosu`
+are skipped. Review the PR, build and test the images, and rerun your security scan.
+If no safe automated change is found, the alert is reported for manual review.
 
 ## GitHub Action
 

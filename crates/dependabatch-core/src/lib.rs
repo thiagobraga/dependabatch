@@ -8,6 +8,7 @@ pub mod alerts;
 pub mod batch;
 pub mod client;
 pub mod conflict;
+mod container_fix;
 pub mod manifest;
 pub mod plan;
 pub mod pr;

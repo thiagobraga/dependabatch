@@ -167,7 +167,7 @@ impl AlertFixPlan {
                 let sev =
                     crate::alerts::colorize_severity(&item.severity.to_uppercase(), &item.severity);
                 out.push_str(&format!(
-                    "  fix {:<16} [{}] {}\n",
+                    "  try {:<16} [{}] {}\n",
                     ids,
                     sev,
                     item.describe()
@@ -345,16 +345,16 @@ pub fn fix_pr_title(plan: &AlertFixPlan) -> String {
         let n = nums[0];
         match &plan.items[0].strategy {
             AlertFixStrategy::SourceCode { rule_id, .. } if !rule_id.is_empty() => {
-                format!("fix(security): resolve code-scanning alert #{n} ({rule_id})")
+                format!("fix(security): address code-scanning alert #{n} ({rule_id})")
             }
             _ => format!(
-                "fix(security): resolve code-scanning alert #{n} in {}",
+                "fix(security): address code-scanning alert #{n} in {}",
                 plan.items[0].path
             ),
         }
     } else {
         format!(
-            "fix(security): resolve {} code-scanning alert(s) via dependabatch",
+            "fix(security): address {} code-scanning alert(s) via dependabatch",
             nums.len()
         )
     }
@@ -365,7 +365,7 @@ pub fn fix_pr_body(plan: &AlertFixPlan, repo: &RepoSlug) -> String {
     let nums = plan.all_alert_numbers();
     let mut out = String::new();
     out.push_str(&format!(
-        "Resolves {} code-scanning alert(s) in `{}`.\n\n",
+        "Proposes changes for {} code-scanning alert(s) in `{}`. These alerts are not verified as fixed. Build and test the changes, then rerun the security scan.\n\n",
         nums.len(),
         repo.as_str()
     ));
@@ -439,6 +439,7 @@ pub async fn run(
 
     let mut fixed_items = 0usize;
     let mut touched_npm = false;
+    let mut changed_items = Vec::new();
 
     for item in &plan.items {
         step(&format!("fixing {}", item.describe()));
@@ -496,8 +497,7 @@ pub async fn run(
                 packages,
             } => {
                 let mut applied =
-                    apply_deterministic_container_fix(&work.root, target, category.as_deref())
-                        .await?;
+                    crate::container_fix::apply(&work.root, target, category.as_deref()).await?;
                 if !applied && ai_mode != "none" {
                     applied = apply_ai_fix(
                         &work.root,
@@ -514,6 +514,12 @@ pub async fn run(
         };
         if changed {
             fixed_items += 1;
+            changed_items.push(item.clone());
+        } else {
+            step(&format!(
+                "skipped {}: no known applicable fix; manual review required",
+                item.describe()
+            ));
         }
     }
 
@@ -526,11 +532,19 @@ pub async fn run(
     if status.trim().is_empty() {
         let _ = fs::remove_dir_all(&parent);
         bail!(
-            "no file changes were produced for the selected alert(s); try running with an AI CLI installed (`claude` or `gemini`) or inspect `--alert <N>`"
+            "no known applicable fix produced file changes; inspect the skipped alerts and review them manually"
         );
     }
 
-    let title = fix_pr_title(plan);
+    let applied_plan = AlertFixPlan {
+        items: changed_items,
+        excluded: Vec::new(),
+        single_alert: plan.single_alert,
+    };
+    step(
+        "changes are unverified: build and test the project and rerun code scanning before merging",
+    );
+    let title = fix_pr_title(&applied_plan);
     step(&format!("committing `{title}`"));
     work.git(&["add", "-A"])?;
     work.git(&["commit", "--quiet", "-m", &title])?;
@@ -540,7 +554,7 @@ pub async fn run(
     work.git(&["push", "--force", "origin", &push_arg])?;
 
     step("opening PR on GitHub");
-    let body = fix_pr_body(plan, repo);
+    let body = fix_pr_body(&applied_plan, repo);
     let pr_url = client
         .create_pull(repo, &title, &branch_name, &base_branch, &body)
         .await?;
@@ -550,7 +564,7 @@ pub async fn run(
         branch: branch_name,
         pr_url,
         fixed_items,
-        alert_numbers: plan.all_alert_numbers(),
+        alert_numbers: applied_plan.all_alert_numbers(),
     })
 }
 
@@ -788,213 +802,6 @@ fn remove_superfluous_trailing_arg(content: &str, target_line_idx: usize) -> Opt
     Some(out)
 }
 
-/// Deterministic container/Dockerfile/compose upgrades:
-/// - Queries Docker Hub for newer patch/minor tags on `library/<image>` or `infra-<image>:<tag>`
-/// - Ensures Alpine Dockerfiles run `apk upgrade --no-cache`
-async fn apply_deterministic_container_fix(
-    root: &Path,
-    target: &str,
-    category: Option<&str>,
-) -> Result<bool> {
-    let mut files = Vec::new();
-    collect_docker_and_compose_files(root, &mut files)?;
-    if files.is_empty() {
-        return Ok(false);
-    }
-
-    // Determine target image name if any (e.g. "nginx", "redis", "postgres")
-    let image_hint = target
-        .strip_prefix("library/")
-        .or_else(|| {
-            category
-                .and_then(|c| c.strip_prefix("infra-"))
-                .and_then(|s| s.split(':').next())
-        })
-        .or_else(|| {
-            if target.ends_with("gosu") {
-                Some("postgres")
-            } else {
-                None
-            }
-        });
-
-    let mut any_changed = false;
-
-    for file in &files {
-        let content = fs::read_to_string(file)?;
-        let mut updated = content.clone();
-
-        if let Some(img) = image_hint {
-            if let Some(new_content) = bump_image_tag_in_text(&updated, img).await {
-                updated = new_content;
-            }
-        }
-
-        // If this is a Dockerfile for nginx/alpine without `apk upgrade --no-cache`, add it
-        let fname = file
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        if (fname == "Dockerfile" || fname.starts_with("Dockerfile."))
-            && image_hint
-                .map(|i| updated.contains(&format!("FROM {i}:")))
-                .unwrap_or(false)
-            && updated.contains("-alpine")
-            && !updated.contains("apk upgrade")
-        {
-            updated = inject_apk_upgrade(&updated, image_hint.unwrap_or_default());
-        }
-
-        if updated != content {
-            fs::write(file, updated)?;
-            any_changed = true;
-        }
-    }
-
-    Ok(any_changed)
-}
-
-async fn bump_image_tag_in_text(content: &str, image: &str) -> Option<String> {
-    // Find occurrences of `<image>:<tag>` in `FROM <image>:<tag>` or `image: <image>:<tag>`
-    let prefix = format!("{image}:");
-    let mut current_tag: Option<String> = None;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !(trimmed.starts_with("FROM ") || trimmed.starts_with("image:")) {
-            continue;
-        }
-        if let Some(pos) = trimmed.find(&prefix) {
-            let after = &trimmed[pos + prefix.len()..];
-            let tag: String = after
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
-                .collect();
-            if !tag.is_empty() {
-                current_tag = Some(tag);
-                break;
-            }
-        }
-    }
-    let cur = current_tag?;
-    let newer = fetch_newer_dockerhub_tag(image, &cur).await?;
-    if newer == cur {
-        return None;
-    }
-    let old_ref = format!("{image}:{cur}");
-    let new_ref = format!("{image}:{newer}");
-    Some(content.replace(&old_ref, &new_ref))
-}
-
-/// Query Docker Hub for the newest tag on the same variant suffix (e.g. `-alpine`).
-async fn fetch_newer_dockerhub_tag(image: &str, current_tag: &str) -> Option<String> {
-    let suffix = if let Some((_, suf)) = current_tag.split_once('-') {
-        format!("-{suf}")
-    } else {
-        String::new()
-    };
-    let url = format!(
-        "https://hub.docker.com/v2/repositories/library/{image}/tags?page_size=100&name={}",
-        suffix.trim_start_matches('-')
-    );
-    let client = reqwest::Client::builder()
-        .user_agent("dependabatch")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let resp: serde_json::Value = client.get(&url).send().await.ok()?.json().await.ok()?;
-    let results = resp.pointer("/results")?.as_array()?;
-
-    let cur_ver_part = current_tag.strip_suffix(&suffix).unwrap_or(current_tag);
-    let cur_dots = cur_ver_part.chars().filter(|&c| c == '.').count();
-    let cur_key = version_tuple(cur_ver_part)?;
-
-    let mut best_tag: Option<(Vec<u64>, String)> = None;
-    for item in results {
-        let name = item.pointer("/name")?.as_str()?;
-        let ver_part = if suffix.is_empty() {
-            if name.contains('-') {
-                continue;
-            }
-            name
-        } else {
-            let Some(v) = name.strip_suffix(&suffix) else {
-                continue;
-            };
-            if v.contains('-') {
-                continue;
-            }
-            v
-        };
-        // Keep the same granularity (e.g. `16-alpine` -> `<major>-alpine` or `1.31-alpine` -> `<major>.<minor>-alpine`)
-        if ver_part.chars().filter(|&c| c == '.').count() != cur_dots {
-            continue;
-        }
-        let Some(key) = version_tuple(ver_part) else {
-            continue;
-        };
-        if key > cur_key {
-            match &best_tag {
-                Some((best_k, _)) if &key <= best_k => {}
-                _ => best_tag = Some((key, name.to_string())),
-            }
-        }
-    }
-    best_tag.map(|(_, t)| t)
-}
-
-fn version_tuple(s: &str) -> Option<Vec<u64>> {
-    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return None;
-    }
-    s.split('.').map(|p| p.parse::<u64>().ok()).collect()
-}
-
-fn inject_apk_upgrade(dockerfile: &str, image: &str) -> String {
-    let mut out = Vec::new();
-    let from_prefix = format!("FROM {image}:");
-    for line in dockerfile.lines() {
-        out.push(line.to_string());
-        if line.trim_start().starts_with(&from_prefix) && line.contains("-alpine") {
-            out.push("RUN apk upgrade --no-cache".to_string());
-        }
-    }
-    let mut joined = out.join("\n");
-    if dockerfile.ends_with('\n') {
-        joined.push('\n');
-    }
-    joined
-}
-
-fn collect_docker_and_compose_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if path.is_dir() {
-            if matches!(
-                name_str.as_ref(),
-                ".git" | "node_modules" | "target" | ".worktrees" | "dist"
-            ) {
-                continue;
-            }
-            collect_docker_and_compose_files(&path, out)?;
-        } else if name_str == "Dockerfile"
-            || name_str.starts_with("Dockerfile.")
-            || name_str.ends_with(".dockerfile")
-            || name_str == "compose.yml"
-            || name_str == "compose.yaml"
-            || name_str == "docker-compose.yml"
-            || name_str == "docker-compose.yaml"
-            || (name_str.starts_with("compose.")
-                && (name_str.ends_with(".yml") || name_str.ends_with(".yaml")))
-        {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 /// Invoke an installed AI CLI (`claude` or `gemini`) in `root` as a fallback fixer.
 fn apply_ai_fix(root: &Path, ai_mode: &str, prompt: &str) -> Result<bool> {
     let candidates: Vec<&str> = match ai_mode {
@@ -1208,7 +1015,7 @@ mod tests {
         let slug = RepoSlug::parse("thiagobraga/planner").unwrap();
         let prev = preview(&plan, &slug);
         assert!(prev.contains(
-            "fix(security): resolve code-scanning alert #216 (js/superfluous-trailing-arguments)"
+            "fix(security): address code-scanning alert #216 (js/superfluous-trailing-arguments)"
         ));
         assert!(prev.contains("app/src/components/ui/ContextMenu.tsx"));
     }

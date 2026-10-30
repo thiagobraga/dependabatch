@@ -24,6 +24,30 @@ struct Cli {
     version: Option<bool>,
 }
 
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn alert_fixes_default_to_no_ai() {
+        match Cli::try_parse_from(["dbatch", "fix", "-a"])
+            .unwrap()
+            .command
+        {
+            Command::Run { ai, .. } => assert_eq!(ai, "none"),
+            _ => panic!("expected fix command"),
+        }
+        match Cli::try_parse_from(["dbatch", "alerts", "--fix"])
+            .unwrap()
+            .command
+        {
+            Command::Alerts { ai, .. } => assert_eq!(ai, "none"),
+            _ => panic!("expected alerts command"),
+        }
+        assert!(Cli::try_parse_from(["dbatch", "fix", "-a", "--ai", "invalid"]).is_err());
+    }
+}
+
 /// Shared options for querying GitHub code-scanning alerts.
 #[derive(Args, Debug, Clone)]
 struct AlertFilterArgs {
@@ -76,7 +100,7 @@ enum Command {
         #[arg(long)]
         path: Option<String>,
         /// AI CLI fallback mode when fixing alerts: auto, claude, gemini, or none.
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value = "none", value_parser = ["auto", "claude", "gemini", "none"])]
         ai: String,
         #[command(flatten)]
         filter: AlertFilterArgs,
@@ -115,7 +139,7 @@ enum Command {
         #[arg(long)]
         path: Option<String>,
         /// AI CLI fallback mode when fixing alerts: auto, claude, gemini, or none.
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value = "none", value_parser = ["auto", "claude", "gemini", "none"])]
         ai: String,
     },
     /// Merge the open batch PR and close all superseded dependabot PRs.
@@ -427,7 +451,7 @@ async fn run_fix_alerts(
     println!();
     println!("alert fix PR  : {}", result.pr_url);
     println!("branch        : {}", result.branch);
-    println!("fixed targets : {}", result.fixed_items);
+    println!("changed targets : {}", result.fixed_items);
     println!("alerts        : {}", format_pr_list(&result.alert_numbers));
     Ok(())
 }
