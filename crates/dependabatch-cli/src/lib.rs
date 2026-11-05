@@ -127,7 +127,11 @@ async fn run() -> Result<()> {
             let has_lock = client
                 .file_exists(&slug, "package-lock.json", &base)
                 .await
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || client
+                    .file_exists(&slug, "yarn.lock", &base)
+                    .await
+                    .unwrap_or(false);
 
             let mut plan = select(&prs, has_lock);
             for name in &exclude {
@@ -276,7 +280,11 @@ async fn serve(host: String, port: u16) -> Result<()> {
         let has_lock = client
             .file_exists(&slug, "package-lock.json", &base)
             .await
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || client
+                .file_exists(&slug, "yarn.lock", &base)
+                .await
+                .unwrap_or(false);
         let plan = select(&prs, has_lock);
         let summary = plan.summary();
         let preview = batch::preview(&plan);
