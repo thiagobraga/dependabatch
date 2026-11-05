@@ -1,7 +1,36 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A package manager, the lockfile it owns and the script that rebuilds it.
+struct Tool {
+    name: &'static str,
+    lock: &'static str,
+    script: &'static str,
+}
+
+const NPM: Tool = Tool {
+    name: "npm",
+    lock: "package-lock.json",
+    script: "npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
+};
+
+/// Berry updates only the lockfile.
+const YARN_BERRY: Tool = Tool {
+    name: "yarn",
+    lock: "yarn.lock",
+    script: "corepack enable && yarn install --mode update-lockfile",
+};
+
+/// Classic has no lockfile-only mode, so `node_modules` is removed afterwards
+/// to keep it out of the batch commit.
+const YARN_CLASSIC: Tool = Tool {
+    name: "yarn",
+    lock: "yarn.lock",
+    script: "corepack enable && yarn install --ignore-scripts --ignore-engines \
+             --non-interactive && rm -rf node_modules",
+};
 
 /// True when the checked-out repo contains `package-lock.json`.
 pub fn has_npm_lock(dir: &Path) -> bool {
@@ -18,102 +47,71 @@ fn is_node_lock_dir(dir: &Path) -> bool {
     dir.join("package.json").is_file() && (has_npm_lock(dir) || has_yarn_lock(dir))
 }
 
-/// Find all directories within `root` that contain `package.json` and an npm or yarn lockfile.
+/// Find `root` and its direct subdirectories (minus hidden, node_modules and
+/// target) that hold `package.json` and an npm or yarn lockfile.
 pub fn find_node_lock_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if is_node_lock_dir(root) {
-        dirs.push(root.to_path_buf());
-    }
-    // Check 1 level of subdirectories (avoiding node_modules, .git, etc.)
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || name == "node_modules" || name == "target" {
-                    continue;
-                }
-                if is_node_lock_dir(&path) {
-                    dirs.push(path);
-                }
-            }
-        }
-    }
-    dirs
+    let subdirs = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            !(name.starts_with('.') || name == "node_modules" || name == "target")
+        })
+        .map(|e| e.path())
+        .filter(|p| p.is_dir());
+    std::iter::once(root.to_path_buf())
+        .chain(subdirs)
+        .filter(|dir| is_node_lock_dir(dir))
+        .collect()
 }
 
 /// Rebuild every npm / yarn lockfile found in the repo inside docker.
+/// Falls back to the root when no lock directory is found.
 pub fn regenerate_all_node_locks(root: &Path, image: &str) -> Result<()> {
-    let dirs = find_node_lock_dirs(root);
-    if dirs.is_empty() {
-        // Fall back to root if package.json exists
-        return regenerate_node_lock(root, image);
-    }
-    for dir in dirs {
-        regenerate_node_lock(&dir, image)?;
-    }
-    Ok(())
+    Some(find_node_lock_dirs(root))
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| vec![root.to_path_buf()])
+        .iter()
+        .try_for_each(|dir| regenerate_node_lock(dir, image))
 }
 
-/// Pick the package manager for one directory: yarn only when no npm lock exists.
-pub fn regenerate_node_lock(dir: &Path, image: &str) -> Result<()> {
-    if has_yarn_lock(dir) && !has_npm_lock(dir) {
-        regenerate_yarn_lock(dir, image)
-    } else {
-        regenerate_npm_lock(dir, image)
+/// Yarn only when `yarn.lock` is the sole lockfile; npm otherwise.
+fn tool_for(dir: &Path) -> &'static Tool {
+    match (has_npm_lock(dir), has_yarn_lock(dir)) {
+        (false, true) if is_yarn_berry(dir) => &YARN_BERRY,
+        (false, true) => &YARN_CLASSIC,
+        _ => &NPM,
     }
 }
 
-/// Rebuild `package-lock.json` from the edited manifests with npm.
+/// Rebuild the lockfile of one directory from its edited manifests.
 ///
 /// Runs inside an ephemeral docker container (`--rm`), mounted read-write only
 /// while it runs. Leaves the host system untouched.
-pub fn regenerate_npm_lock(dir: &Path, image: &str) -> Result<()> {
-    run_in_docker(
-        dir,
-        image,
-        "npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
-        "npm",
-    )?;
-    if !has_npm_lock(dir) {
-        return Err(anyhow!(
-            "npm lockfile regen finished but package-lock.json is missing"
-        ));
-    }
-    Ok(())
-}
-
-/// Rebuild `yarn.lock` from the edited manifests with yarn.
-///
-/// Yarn berry (`__metadata:` header) updates only the lockfile. Yarn classic
-/// has no lockfile-only mode, so `node_modules` is removed afterwards to keep
-/// it out of the batch commit.
-pub fn regenerate_yarn_lock(dir: &Path, image: &str) -> Result<()> {
-    let script = if is_yarn_berry(dir) {
-        "corepack enable && yarn install --mode update-lockfile"
-    } else {
-        "corepack enable && yarn install --ignore-scripts --ignore-engines --non-interactive \
-         && rm -rf node_modules"
-    };
-    run_in_docker(dir, image, script, "yarn")?;
-    if !has_yarn_lock(dir) {
-        return Err(anyhow!(
-            "yarn lockfile regen finished but yarn.lock is missing"
-        ));
-    }
+pub fn regenerate_node_lock(dir: &Path, image: &str) -> Result<()> {
+    let tool = tool_for(dir);
+    run_in_docker(dir, image, tool)?;
+    ensure!(
+        dir.join(tool.lock).is_file(),
+        "{} lockfile regen finished but {} is missing",
+        tool.name,
+        tool.lock
+    );
     Ok(())
 }
 
 /// Berry lockfiles start with a `__metadata:` block; classic ones do not.
 fn is_yarn_berry(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("yarn.lock"))
-        .map(|s| s.contains("\n__metadata:") || s.starts_with("__metadata:"))
-        .unwrap_or(false)
+        .is_ok_and(|s| s.starts_with("__metadata:") || s.contains("\n__metadata:"))
 }
 
-fn run_in_docker(dir: &Path, image: &str, script: &str, tool: &str) -> Result<()> {
+fn run_in_docker(dir: &Path, image: &str, tool: &Tool) -> Result<()> {
     docker_available().context(format!(
-        "docker is required for {tool} lockfile regeneration (or run with --no-regen)"
+        "docker is required for {} lockfile regeneration (or run with --no-regen)",
+        tool.name
     ))?;
     let name = container_name();
     let mount = format!("{}:/work", dir.display());
@@ -136,16 +134,16 @@ fn run_in_docker(dir: &Path, image: &str, script: &str, tool: &str) -> Result<()
             image,
             "sh",
             "-c",
-            script,
+            tool.script,
         ])
         .output()
         .context("failed to launch docker")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{tool} lockfile regen failed inside docker:\n{}",
-            trim(&output.stderr)
-        ));
-    }
+    ensure!(
+        output.status.success(),
+        "{} lockfile regen failed inside docker:\n{}",
+        tool.name,
+        trim(&output.stderr)
+    );
     Ok(())
 }
 
@@ -154,13 +152,11 @@ fn docker_available() -> Result<()> {
         .args(["version", "--format", "{{.Server.Version}}"])
         .output()
         .context("docker binary not found on PATH")?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "docker daemon not reachable; start it or run with --no-regen"
-        ))
-    }
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| anyhow!("docker daemon not reachable; start it or run with --no-regen"))
 }
 
 fn container_name() -> String {
