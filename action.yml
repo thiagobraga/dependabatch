@@ -33,6 +33,10 @@ inputs:
     description: 'Skip lockfile regeneration'
     required: false
     default: 'false'
+  update:
+    description: 'Trigger update-branch on every open Dependabot PR before batching (irreversible)'
+    required: false
+    default: 'false'
   regen_image:
     description: 'Docker image for lockfile regeneration'
     required: false
@@ -88,6 +92,9 @@ runs:
           fi
           if [ "${{ inputs.no_regen }}" = "true" ]; then
             ARGS+=(--no-regen)
+          fi
+          if [ "${{ inputs.update }}" = "true" ]; then
+            ARGS+=(--update)
           fi
           if [ -n "${{ inputs.regen_image }}" ] && [ "${{ inputs.regen_image }}" != "node:24" ]; then
             ARGS+=(--regen-image "${{ inputs.regen_image }}")

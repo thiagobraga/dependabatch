@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::alerts::CodeScanningAlert;
@@ -525,7 +525,7 @@ pub async fn run(
 
     if touched_npm && !no_regen {
         step("regenerating npm lockfile(s) inside ephemeral docker container");
-        crate::regen::regenerate_all_npm_locks(&work.root, regen_image)?;
+        crate::regen::regenerate_all_node_locks(&work.root, regen_image)?;
     }
 
     let status = work.git_stdout(&["status", "--porcelain"])?;
@@ -912,21 +912,19 @@ fn clone_workspace(
         .env("DEPENDABATCH_TOKEN", token)
         .args([
             "clone",
-            "--quiet",
+            "--progress",
             "--depth",
             "1",
             "--branch",
             base_branch,
             &url,
             root.to_str().context("clone path")?,
-        ]);
-    let out = cmd.output().context("git clone failed")?;
-    if !out.status.success() {
-        bail!(
-            "git clone failed for {}:\n{}",
-            repo.as_str(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        ])
+        .stderr(Stdio::inherit());
+    let status = cmd.status().context("git clone failed")?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(parent);
+        bail!("git clone failed for {} ({status})", repo.as_str());
     }
 
     let w = FixWorkspace {

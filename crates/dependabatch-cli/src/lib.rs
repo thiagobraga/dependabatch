@@ -46,6 +46,28 @@ mod cli_tests {
         }
         assert!(Cli::try_parse_from(["dbatch", "fix", "-a", "--ai", "invalid"]).is_err());
     }
+
+    #[test]
+    fn fix_parses_update_flag() {
+        match Cli::try_parse_from(["dbatch", "fix", "-u"])
+            .unwrap()
+            .command
+        {
+            Command::Run { update, .. } => assert!(update),
+            _ => panic!("expected fix command"),
+        }
+        match Cli::try_parse_from(["dbatch", "run", "--update"])
+            .unwrap()
+            .command
+        {
+            Command::Run { update, .. } => assert!(update),
+            _ => panic!("expected run command"),
+        }
+        match Cli::try_parse_from(["dbatch", "run"]).unwrap().command {
+            Command::Run { update, .. } => assert!(!update),
+            _ => panic!("expected run command"),
+        }
+    }
 }
 
 /// Shared options for querying GitHub code-scanning alerts.
@@ -126,6 +148,10 @@ enum Command {
         /// Print the plan and the PR preview, then stop (also -n).
         #[arg(long, short = 'n')]
         dry_run: bool,
+        /// Trigger GitHub's update-branch on every open Dependabot PR before
+        /// batching. This rewrites those PR branches and cannot be undone.
+        #[arg(short = 'u', long)]
+        update: bool,
         /// Fix GitHub code-scanning alerts instead of batching dependabot PRs (also -a).
         #[arg(short = 'a', long = "alerts", visible_alias = "code-scanning")]
         alerts: bool,
@@ -240,6 +266,7 @@ async fn run() -> Result<()> {
             regen_image,
             no_regen,
             dry_run,
+            update,
             alerts,
             alert,
             severity,
@@ -247,6 +274,9 @@ async fn run() -> Result<()> {
             ai,
         } => {
             if alerts || alert.is_some() || severity.is_some() || path.is_some() {
+                if update {
+                    bail!("--update only applies to Dependabot batches, not code-scanning fixes");
+                }
                 return run_fix_alerts(
                     repo.as_deref(),
                     base.as_deref(),
@@ -294,6 +324,35 @@ async fn run() -> Result<()> {
             }
 
             println!("{}", plan.summary());
+            if update {
+                let mut numbers: Vec<u64> = prs.iter().map(|pr| pr.number).collect();
+                numbers.sort_unstable();
+                if dry_run {
+                    println!("\nupdate-branch preview (irreversible):");
+                    println!(
+                        "  would update {} PR(s): {}",
+                        numbers.len(),
+                        format_pr_list(&numbers)
+                    );
+                } else if numbers.is_empty() {
+                    println!("\nnothing to update: no open Dependabot PRs");
+                } else {
+                    println!(
+                        "\ntriggering update-branch on {} PR(s) (irreversible)...",
+                        numbers.len()
+                    );
+                    let res = batch::update_branches(&slug, &token, &numbers).await?;
+                    println!("updated : {}", format_pr_list(&res.updated));
+                    if res.skipped.is_empty() {
+                        println!("skipped : none");
+                    } else {
+                        println!("skipped :");
+                        for skip in &res.skipped {
+                            println!("  #{:<4} {}", skip.number, skip.reason);
+                        }
+                    }
+                }
+            }
             if dry_run {
                 if !plan.included.is_empty() {
                     println!("\n----- batch PR preview -----\n");
