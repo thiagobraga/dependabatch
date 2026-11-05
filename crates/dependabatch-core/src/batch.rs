@@ -285,8 +285,8 @@ pub async fn run(
     }
 
     if plan.regen == RegenPlan::Npm {
-        step("regenerating npm lockfile(s) inside an ephemeral docker container");
-        if let Err(err) = crate::regen::regenerate_all_npm_locks(&work.root, regen_image) {
+        step("regenerating npm/yarn lockfile(s) inside an ephemeral docker container");
+        if let Err(err) = crate::regen::regenerate_all_node_locks(&work.root, regen_image) {
             return Err(err.context(scratch_note(&parent)));
         }
     }

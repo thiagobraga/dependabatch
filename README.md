@@ -203,7 +203,7 @@ docker image prune -f
 
 ## Ecosystems (v1)
 
-- npm (`package.json` + lockfiles via ephemeral node containers)
+- npm and yarn classic/berry (`package.json` + `package-lock.json` / `yarn.lock` via ephemeral node containers)
 - GitHub Actions workflows (`.github/workflows`)
 
 ## License

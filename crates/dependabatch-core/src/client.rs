@@ -181,7 +181,18 @@ impl GithubClient {
             .context("repository without default_branch")
     }
 
-    /// `package-lock.json` presence check via the contents API.
+    /// True when `git_ref` has an npm or yarn lockfile at the repo root.
+    /// Lookup failures count as absent.
+    pub async fn has_node_lock(&self, repo: &RepoSlug, git_ref: &str) -> bool {
+        for lock in ["package-lock.json", "yarn.lock"] {
+            if self.file_exists(repo, lock, git_ref).await.unwrap_or(false) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// File presence check via the contents API.
     pub async fn file_exists(&self, repo: &RepoSlug, path: &str, git_ref: &str) -> Result<bool> {
         let url = format!(
             "https://api.github.com/repos/{}/contents/{path}",
