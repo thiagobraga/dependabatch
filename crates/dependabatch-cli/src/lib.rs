@@ -124,10 +124,7 @@ async fn run() -> Result<()> {
                 Some(b) => b,
                 None => client.default_branch(&slug).await?,
             };
-            let has_lock = client
-                .file_exists(&slug, "package-lock.json", &base)
-                .await
-                .unwrap_or(false);
+            let has_lock = client.has_node_lock(&slug, &base).await;
 
             let mut plan = select(&prs, has_lock);
             for name in &exclude {
@@ -273,10 +270,7 @@ async fn serve(host: String, port: u16) -> Result<()> {
             .default_branch(&slug)
             .await
             .map_err(api_err(StatusCode::BAD_GATEWAY))?;
-        let has_lock = client
-            .file_exists(&slug, "package-lock.json", &base)
-            .await
-            .unwrap_or(false);
+        let has_lock = client.has_node_lock(&slug, &base).await;
         let plan = select(&prs, has_lock);
         let summary = plan.summary();
         let preview = batch::preview(&plan);

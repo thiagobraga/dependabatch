@@ -13,6 +13,8 @@ pub enum FileKind {
     Workflow,
     /// Dockerfile or docker compose configuration.
     Docker,
+    /// `yarn.lock` (classic or berry), regenerated with yarn inside docker.
+    YarnLock,
     /// Lockfile kinds whose regen is not implemented yet.
     PendingLock(String),
     /// Anything else (gradle, terraform, binlockless...).
@@ -24,7 +26,8 @@ pub fn classify_file(filename: &str) -> FileKind {
     match base {
         "package.json" => FileKind::NpmManifest,
         "package-lock.json" => FileKind::NpmLock,
-        "yarn.lock" | "pnpm-lock.yaml" | "pnpm-lock.yml" | "bun.lock" | "bun.lockb" => {
+        "yarn.lock" => FileKind::YarnLock,
+        "pnpm-lock.yaml" | "pnpm-lock.yml" | "bun.lock" | "bun.lockb" => {
             FileKind::PendingLock(base.to_string())
         }
         _ if base == "Dockerfile"
@@ -52,7 +55,7 @@ pub fn classify_file(filename: &str) -> FileKind {
 fn manifest_or_lockfile_skipped(f: &PrFile) -> bool {
     matches!(
         classify_file(&f.filename),
-        FileKind::NpmLock | FileKind::NpmManifest
+        FileKind::NpmLock | FileKind::YarnLock | FileKind::NpmManifest
     )
 }
 
@@ -67,7 +70,7 @@ pub struct Excluded {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegenPlan {
-    /// Run npm inside a docker container to rebuild `package-lock.json`.
+    /// Run npm or yarn inside a docker container to rebuild the node lockfiles.
     Npm,
     /// Manifest edits only; the repo has no npm lockfile to regenerate.
     ManifestOnly,
@@ -119,6 +122,7 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
             match kind {
                 FileKind::NpmManifest
                 | FileKind::NpmLock
+                | FileKind::YarnLock
                 | FileKind::Workflow
                 | FileKind::Docker => {}
                 FileKind::PendingLock(name) => {
@@ -130,7 +134,8 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
                     break;
                 }
             }
-            if kind != FileKind::NpmLock && file.patch.is_none() {
+            let regenerated = matches!(kind, FileKind::NpmLock | FileKind::YarnLock);
+            if !regenerated && file.patch.is_none() {
                 reject = Some(format!(
                     "no patch data for `{}` (binary, deletion or rename)",
                     file.filename
@@ -220,9 +225,12 @@ pub fn select(prs: &[PullRequest], repo_has_npm_lock: bool) -> Plan {
 
     // 4: regen plan
     let touches_lock = included.iter().any(|pr| {
-        pr.files
-            .iter()
-            .any(|f| classify_file(&f.filename) == FileKind::NpmLock)
+        pr.files.iter().any(|f| {
+            matches!(
+                classify_file(&f.filename),
+                FileKind::NpmLock | FileKind::YarnLock
+            )
+        })
     });
     let touches_manifest = included.iter().any(|pr| {
         pr.files
@@ -352,7 +360,11 @@ mod tests {
                 bump("gradle", "1", "2"),
                 vec![file("build.gradle", 1, 2)],
             ),
-            pr(3, bump("yarn", "1", "2"), vec![file("yarn.lock", 1, 2)]),
+            pr(
+                3,
+                bump("pnpm", "1", "2"),
+                vec![file("pnpm-lock.yaml", 1, 2)],
+            ),
         ];
         let plan = select(&prs, false);
         assert_eq!(plan.included.len(), 0);
@@ -484,6 +496,27 @@ mod tests {
                 2,
                 bump("axios", "1.6.0", "1.7.0"),
                 vec![file("package.json", 60, 4), shared_lock],
+            ),
+        ];
+        let plan = select(&prs, true);
+        assert_eq!(plan.included.len(), 2);
+        assert_eq!(plan.regen, RegenPlan::Npm);
+    }
+
+    #[test]
+    fn yarn_lock_prs_are_batched_and_regenerated() {
+        let mut lock = file("yarn.lock", 10, 300);
+        lock.patch = None;
+        let prs = vec![
+            pr(
+                1,
+                bump("vue", "3.4.0", "3.5.0"),
+                vec![file("package.json", 10, 4), file("yarn.lock", 10, 300)],
+            ),
+            pr(
+                2,
+                bump("axios", "1.6.0", "1.7.0"),
+                vec![file("package.json", 60, 4), lock],
             ),
         ];
         let plan = select(&prs, true);

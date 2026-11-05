@@ -8,7 +8,7 @@ use crate::pr::{PullRequest, Update};
 fn manifest_or_lockfile_skipped(f: &crate::pr::PrFile) -> bool {
     matches!(
         classify_file(&f.filename),
-        FileKind::NpmLock | FileKind::NpmManifest
+        FileKind::NpmLock | FileKind::YarnLock | FileKind::NpmManifest
     )
 }
 
