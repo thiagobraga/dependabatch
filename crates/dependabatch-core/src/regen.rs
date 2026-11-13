@@ -92,7 +92,9 @@ fn tool_for(dir: &Path) -> &'static Tool {
 /// while it runs. Leaves the host system untouched.
 pub fn regenerate_node_lock(dir: &Path, image: &str) -> Result<()> {
     let tool = tool_for(dir);
-    run_in_docker(dir, image, tool)?;
+    keeping_manifest(&dir.join("package.json"), || {
+        run_in_docker(dir, image, tool)
+    })?;
     ensure!(
         dir.join(tool.lock).is_file(),
         "{} lockfile regen finished but {} is missing",
@@ -100,6 +102,21 @@ pub fn regenerate_node_lock(dir: &Path, image: &str) -> Result<()> {
         tool.lock
     );
     Ok(())
+}
+
+/// Run `f`, then put the manifest back exactly as it was before.
+///
+/// The package managers rewrite `package.json` while resolving (yarn sorts
+/// keys and adds `packageManager`, `engines`, `dependenciesMeta`), which would
+/// bury the version bump in unrelated churn. Only the lockfile should change.
+fn keeping_manifest<T>(manifest: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let original = std::fs::read(manifest).ok();
+    let result = f();
+    if let Some(bytes) = original {
+        std::fs::write(manifest, bytes)
+            .with_context(|| format!("restoring `{}` after lockfile regen", manifest.display()))?;
+    }
+    result
 }
 
 /// Berry lockfiles start with a `__metadata:` block; classic ones do not.
@@ -207,6 +224,21 @@ mod tests {
         assert!(is_yarn_berry(&root));
         std::fs::write(root.join("yarn.lock"), "# yarn lockfile v1\n\nfoo@^1:\n").unwrap();
         assert!(!is_yarn_berry(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn keeping_manifest_undoes_rewrites() {
+        let root = tmp("keep-manifest");
+        let manifest = root.join("package.json");
+        let original = "{\n    \"name\": \"a\",\n    \"version\": \"1\"\n}\n";
+        std::fs::write(&manifest, original).unwrap();
+        let out = keeping_manifest(&manifest, || {
+            std::fs::write(&manifest, "{\"version\":\"1\",\"name\":\"a\"}").unwrap();
+            Ok(7)
+        });
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), original);
         std::fs::remove_dir_all(&root).ok();
     }
 }
