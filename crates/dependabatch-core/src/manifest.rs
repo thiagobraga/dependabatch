@@ -280,4 +280,41 @@ mod tests {
         assert!(updated.ends_with('\n'));
         let _ = fs::remove_dir_all(&temp);
     }
+
+    #[test]
+    fn apply_bumps_preserves_key_order() {
+        let temp =
+            std::env::temp_dir().join(format!("dependabatch-test-order-{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp);
+        let path = temp.join("package.json");
+
+        let original = r#"{
+  "name": "example",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node .",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "zod": "^3.0.0"
+  },
+  "browserslist": [
+    ">0.2%"
+  ]
+}
+"#;
+        fs::write(&path, original).unwrap();
+
+        let bump = DepBump {
+            name: "zod".to_string(),
+            from: "3.0.0".to_string(),
+            to: "3.1.0".to_string(),
+            path: None,
+        };
+        apply_bumps_to_package_json(&path, &[&bump]).unwrap();
+
+        let updated = fs::read_to_string(&path).unwrap();
+        assert_eq!(updated, original.replace("^3.0.0", "^3.1.0"));
+        let _ = fs::remove_dir_all(&temp);
+    }
 }
