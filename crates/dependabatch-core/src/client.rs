@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::header::ACCEPT;
 use serde_json::Value;
 
+use crate::alerts::CodeScanningAlert;
 use crate::pr::{DEPENDABOT_LOGIN, PrFile, PullRequest, parse_hunks_from_patch};
 
 /// `owner/name` repository identifier.
@@ -53,6 +54,15 @@ pub struct BatchPullInfo {
     pub html_url: String,
     pub body: String,
     pub merged: bool,
+}
+
+/// Outcome of asking GitHub to update a pull request branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchUpdate {
+    /// GitHub accepted the request and is updating the branch.
+    Triggered,
+    /// GitHub refused, usually because the branch is already up to date.
+    Skipped(String),
 }
 
 /// Minimal typed wrapper over the GitHub REST API used by dependabatch.
@@ -316,6 +326,47 @@ impl GithubClient {
         Ok(())
     }
 
+    /// Ask GitHub to update a pull request branch with the latest base changes
+    /// ("Update branch"). This mutates the PR branch and cannot be undone.
+    pub async fn update_pull_branch(&self, repo: &RepoSlug, number: u64) -> Result<BranchUpdate> {
+        let url = format!(
+            "https://api.github.com/repos/{}/pulls/{number}/update-branch",
+            repo.as_str()
+        );
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.token)
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(BranchUpdate::Triggered);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| body.trim().to_string());
+        if status.as_u16() == 422 {
+            let reason = if message.is_empty() {
+                "update not possible (branch may already be up to date)".to_string()
+            } else {
+                message
+            };
+            return Ok(BranchUpdate::Skipped(reason));
+        }
+        Err(anyhow!(
+            "updating branch of pull request #{number} failed ({status}): {message}"
+        ))
+    }
+
     /// Comment `Superseded by #<batch_number>` and close an open PR.
     /// Returns `Ok(true)` if it was open and closed, `Ok(false)` if already closed.
     pub async fn close_superseded_pull(
@@ -368,6 +419,70 @@ impl GithubClient {
             .with_context(|| format!("closing PR #{number} failed"))?;
 
         Ok(true)
+    }
+
+    /// Paginated list of code-scanning alerts for a repository.
+    pub async fn code_scanning_alerts(
+        &self,
+        repo: &RepoSlug,
+        state: &str,
+        git_ref: Option<&str>,
+        severity: Option<&str>,
+    ) -> Result<Vec<CodeScanningAlert>> {
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        let url = format!(
+            "https://api.github.com/repos/{}/code-scanning/alerts",
+            repo.as_str()
+        );
+        loop {
+            let mut query = vec![
+                ("state", state.to_string()),
+                ("per_page", "100".to_string()),
+                ("page", page.to_string()),
+            ];
+            if let Some(r) = git_ref {
+                query.push(("ref", r.to_string()));
+            }
+            if let Some(sev) = severity {
+                query.push(("severity", sev.to_string()));
+            }
+            let batch: Vec<Value> = self
+                .get(&url, &query)
+                .await
+                .with_context(|| format!("fetching code-scanning alerts for {}", repo.as_str()))?;
+            let count = batch.len();
+            for item in batch {
+                if let Some(alert) = CodeScanningAlert::from_json(&item) {
+                    out.push(alert);
+                }
+            }
+            if count < 100 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    /// Fetch a single code-scanning alert by number.
+    pub async fn code_scanning_alert(
+        &self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<CodeScanningAlert> {
+        let url = format!(
+            "https://api.github.com/repos/{}/code-scanning/alerts/{number}",
+            repo.as_str()
+        );
+        let raw: Value = self.get(&url, &[]).await.with_context(|| {
+            format!(
+                "fetching code-scanning alert #{number} in {}",
+                repo.as_str()
+            )
+        })?;
+        CodeScanningAlert::from_json(&raw)
+            .ok_or_else(|| anyhow!("malformed code-scanning alert #{number} response"))
     }
 
     async fn get<T: serde::de::DeserializeOwned>(

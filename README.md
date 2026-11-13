@@ -1,4 +1,8 @@
-# dependabatch
+<p align="center">
+  <img src=".github/assets/dependabatch.png" width="auto" height="384" alt="Icon for dependabatch script, dependabot fixer">
+</p>
+
+<h1 align="center">dependabatch</h1>
 
 Open source dependabot PR organizer and automation.
 
@@ -14,15 +18,15 @@ closes the originals with a `Superseded by #N` comment.
 
 ## Status: work in progress
 
-| Stage | Feature | State |
-| ----- | ------- | ----- |
-| 1 | `dependabatch scan [owner/repo\|path]`: report open dependabot PRs and conflicts | shipping |
-| 2 | `dependabatch run [owner/repo\|path]`: open the batch PR (aliases: `pr`, `fix`, `batch`) | shipping |
-| 3 | `dependabatch merge` / `dependabatch close`: merge and close superseded PRs | shipping |
-| 4 | `dependabatch.yml` per-repo config | planned |
-| 5 | GitHub Action wrapper (`uses: thiagobraga/dependabatch@v0.4.0`) | shipping |
-| 6 | Web dashboard (axum + React) | planned |
-| 7 | Tauri desktop app | planned |
+| Stage | Feature                                                                                  | State    |
+| ----- | ---------------------------------------------------------------------------------------- | -------- |
+| 1     | `dependabatch scan [owner/repo\|path]`: report open dependabot PRs and conflicts         | shipping |
+| 2     | `dependabatch run [owner/repo\|path]`: open the batch PR (aliases: `pr`, `fix`, `batch`) | shipping |
+| 3     | `dependabatch merge` / `dependabatch close`: merge and close superseded PRs              | shipping |
+| 4     | `dependabatch.yml` per-repo config                                                       | planned  |
+| 5     | GitHub Action wrapper (`uses: thiagobraga/dependabatch@v0.5.0`)                          | shipping |
+| 6     | Web dashboard (axum + React)                                                             | planned  |
+| 7     | Tauri desktop app                                                                        | planned  |
 
 ## Quickstart
 
@@ -33,8 +37,19 @@ cd ~/projects/app && dependabatch scan
 # or point at a local checkout / an explicit repo
 dbatch scan ~/projects/app
 dbatch scan thiagobraga/dependabatch
+# scan GitHub code-scanning alerts (table + path breakdown)
+dbatch scan -a thiagobraga/planner
+dbatch alerts thiagobraga/planner --severity critical
+dbatch alerts thiagobraga/planner --alert 191
+# preview or open a PR fixing code-scanning alerts
+dbatch fix -a thiagobraga/planner -n
+dbatch fix --alert 216 thiagobraga/planner
 # look at the plan without touching anything
 dependabatch run owner/repo --dry-run
+# preview update-branch on every open Dependabot PR, without touching anything
+dependabatch fix -u --dry-run owner/repo
+# update every open Dependabot PR branch, then batch (irreversible)
+dependabatch fix -u owner/repo
 # open the batch PR (or use aliases: dbatch pr, dbatch fix, dbatch batch)
 dependabatch run owner/repo
 # merge the open batch PR and close superseded dependabot PRs
@@ -71,17 +86,43 @@ install from a checkout with `cargo install --path crates/dependabatch-cli`.
 
 ## Batch flags
 
-| Flag | Meaning |
-| ---- | ------- |
-| `-n` / `--dry-run` | print the plan (in/out per PR) plus a preview of the batch PR, then stop |
-| `--exclude zod` | keep a dependency out of the batch |
-| `--base main` | build from another base branch instead of the default |
-| `--regen-image node:24` | docker image used for lockfile regen |
-| `--no-regen` | skip lockfile regeneration (manifest edits only) |
+| Flag                    | Meaning                                                                  |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `-n` / `--dry-run`      | print the plan (in/out per PR) plus a preview of the batch PR, then stop |
+| `-u` / `--update`       | trigger `update-branch` on every open Dependabot PR before batching      |
+| `--exclude zod`         | keep a dependency out of the batch                                       |
+| `--base main`           | build from another base branch instead of the default                    |
+| `--regen-image node:24` | docker image used for lockfile regen                                     |
+| `--no-regen`            | skip lockfile regeneration (manifest edits only)                         |
+
+`--update` asks GitHub to merge the base branch into every open Dependabot PR
+branch before batching. It is irreversible; with `--dry-run` it only lists the
+PRs that would be updated.
 
 The batch PR body carries a table of every bump plus `Close #12, Close #14`,
 so GitHub cross-links the originals and `dependabatch close` / `dependabatch merge`
 knows which PRs to close.
+
+## Code-scanning alert flags
+
+Use `dependabatch scan --alerts` (or `-a`, or the `dependabatch alerts` / `dbatch cs` alias)
+to query GitHub's code-scanning alerts API with automatic pagination and path grouping:
+
+| Flag                 | Meaning                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `-a` / `--alerts`    | query code-scanning alerts on `scan`, or fix them on `fix` / `run` (alias: `--code-scanning`) |
+| `--severity <level>` | filter by severity (`critical`, `high`, `medium`, `low`, `error`, `warning`, `note`)          |
+| `--state <state>`    | alert state: `open` (default), `fixed`, `dismissed`, or `closed`                              |
+| `--ref <git-ref>`    | branch or git ref (defaults to repo default branch; pass `all` for all refs)                  |
+| `--alert <number>`   | inspect (`scan` / `alerts`) or fix (`fix` / `alerts --fix`) a single alert                    |
+| `--path <substring>` | filter alerts by file/target path when fixing                                                 |
+| `--ai <mode>`        | AI CLI fallback (`none` by default; opt in with `auto`, `claude`, or `gemini`)                |
+| `--json`             | output machine-readable JSON                                                                  |
+
+Container fixes only propose newer matching image tags within the same major version.
+They do not verify that an alert is resolved, and embedded binaries such as `gosu`
+are skipped. Review the PR, build and test the images, and rerun your security scan.
+If no safe automated change is found, the alert is reported for manual review.
 
 ## GitHub Action
 
@@ -181,3 +222,9 @@ docker image prune -f
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Palette
+
+`#d27d5e`
+
+`#49556c`

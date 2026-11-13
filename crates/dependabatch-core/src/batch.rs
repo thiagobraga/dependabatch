@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::client::{GithubClient, RepoSlug};
+use crate::client::{BranchUpdate, GithubClient, RepoSlug};
 use crate::plan::{FileKind, Plan, RegenPlan, classify_file};
 use crate::pr::{PrFile, PullRequest};
 
@@ -37,6 +37,45 @@ pub struct MergeResult {
     pub pr_url: String,
     pub closed: Vec<u64>,
     pub already_closed: Vec<u64>,
+}
+
+/// One PR GitHub refused to update.
+#[derive(Debug, Serialize)]
+pub struct SkippedBranchUpdate {
+    pub number: u64,
+    pub reason: String,
+}
+
+/// Outcome of triggering GitHub's update-branch on a set of PRs.
+#[derive(Debug, Serialize)]
+pub struct UpdateBranchesResult {
+    pub updated: Vec<u64>,
+    pub skipped: Vec<SkippedBranchUpdate>,
+}
+
+/// Trigger GitHub's "Update branch" (merge base into head) for each PR.
+/// GitHub applies the update asynchronously; refused updates are reported as skipped.
+pub async fn update_branches(
+    repo: &RepoSlug,
+    token: &str,
+    numbers: &[u64],
+) -> Result<UpdateBranchesResult> {
+    let client = GithubClient::new(token)?;
+    let mut updated = Vec::new();
+    let mut skipped = Vec::new();
+    for &number in numbers {
+        match client.update_pull_branch(repo, number).await? {
+            BranchUpdate::Triggered => {
+                eprintln!("[dependabatch] update-branch queued for #{number}");
+                updated.push(number);
+            }
+            BranchUpdate::Skipped(reason) => {
+                eprintln!("[dependabatch] update-branch skipped for #{number}: {reason}");
+                skipped.push(SkippedBranchUpdate { number, reason });
+            }
+        }
+    }
+    Ok(UpdateBranchesResult { updated, skipped })
 }
 
 /// Batch PR title, conventional-commits style.
